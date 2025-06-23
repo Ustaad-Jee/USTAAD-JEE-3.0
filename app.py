@@ -36,12 +36,31 @@ from firebase_admin import auth, firestore
 load_dotenv()
 
 # Initialize Firebase Admin SDK
+# Load environment variables (optional for local fallback)
+load_dotenv()
+
+# Initialize Firebase Admin SDK
 if not firebase_admin._apps:
-    cred = credentials.Certificate(
-        os.getenv("FIREBASE_SERVICE_ACCOUNT_PATH") or st.secrets.get("FIREBASE_SERVICE_ACCOUNT_PATH"))
+    # Try to get service account from Streamlit Secrets as JSON content
+    service_account_json = st.secrets.get("firebase.SERVICE_ACCOUNT")
+    if service_account_json:
+        import json
+        try:
+            cred = credentials.Certificate(json.loads(service_account_json))
+        except json.JSONDecodeError as e:
+            raise ValueError(f"Invalid JSON in firebase.SERVICE_ACCOUNT: {str(e)}")
+    else:
+        # Fallback to file path from environment or Streamlit Secrets
+        service_account_path = os.getenv("FIREBASE_SERVICE_ACCOUNT_PATH") or st.secrets.get("FIREBASE_SERVICE_ACCOUNT_PATH")
+        if service_account_path and os.path.exists(service_account_path):
+            cred = credentials.Certificate(service_account_path)
+        else:
+            raise ValueError(
+                "Firebase service account not found. Set 'firebase.SERVICE_ACCOUNT' in Streamlit Secrets "
+                "with the JSON content, or provide 'FIREBASE_SERVICE_ACCOUNT_PATH' with a valid file path."
+            )
     firebase_admin.initialize_app(cred)
 db = firestore.client()
-
 
 # Configuration for easy maintenance
 class AppConfig:
@@ -433,7 +452,37 @@ class FeedbackDB:
 
 def init_session_state():
     if 'llm' not in st.session_state:
-        st.session_state.llm = None
+        if st.session_state.get('is_admin', False):
+            st.session_state.llm = None
+            st.session_state.connection_status = "Not Connected"
+        else:
+            try:
+                api_key = os.getenv("OPENAI_API_KEY")
+                if not api_key:
+                    st.error("OpenAI API key not found in environment variables!")
+                    st.session_state.connection_status = "Failed"
+                else:
+                    # Initialize LLMWrapper
+                    llm = LLMWrapper(
+                        provider=LLMProvider.OPENAI,
+                        api_key=api_key,
+                        model="gpt-4o-mini"
+                    )
+                    # Test the connection with a simple prompt
+                    try:
+                        test_response = llm.generate("Test connection", max_tokens=10)
+                        if test_response and "error" not in test_response.lower():
+                            st.session_state.llm = llm
+                            st.session_state.connection_status = "Connected"
+                        else:
+                            st.session_state.connection_status = "Failed"
+                            st.error("API test failed: Invalid response from OpenAI")
+                    except Exception as e:
+                        st.session_state.connection_status = "Failed"
+                        st.error(f"API connection test failed: {str(e)}")
+            except Exception as e:
+                st.error(f"Failed to initialize LLM: {str(e)}")
+                st.session_state.connection_status = "Failed"
     if 'glossary' not in st.session_state:
         st.session_state.glossary = {}
     if 'connection_status' not in st.session_state:
@@ -456,7 +505,6 @@ def init_session_state():
         st.session_state.auth_success = ""
     if 'is_admin' not in st.session_state:
         st.session_state.is_admin = False
-
 
 def create_auth_interface():
     # Custom CSS for better styling
@@ -917,6 +965,15 @@ def create_admin_interface():
 
 def create_llm_configuration_section():
     st.markdown("### Configure Ustaad Jee's Brain 🧠")
+
+    if not st.session_state.get('is_admin', False):
+        # Non-admin users: Display connection status only
+        status_color = {"Connected": "🟢", "Not Connected": "🟡", "Failed": "🔴"}
+        st.info(f"Status: {status_color.get(st.session_state.connection_status, '🟡')} {st.session_state.connection_status}")
+        st.markdown("Using OpenAI GPT-4o-mini (default configuration).")
+        return
+
+    # Admin users: Full configuration options
     col1, col2 = st.columns([1, 1])
     with col1:
         provider_options = {
@@ -981,6 +1038,7 @@ def create_llm_configuration_section():
             except Exception as e:
                 st.error(f"Error: {str(e)}")
                 st.session_state.connection_status = "Failed"
+
     if st.session_state.llm is None and st.session_state.connection_status != "Failed":
         try:
             config = {"model": selected_model}
@@ -993,6 +1051,7 @@ def create_llm_configuration_section():
                 st.session_state.llm = LLMWrapper(provider_enum, **config)
         except:
             pass
+
     status_color = {"Connected": "🟢", "Not Connected": "🟡", "Failed": "🔴"}
     st.info(f"Status: {status_color.get(st.session_state.connection_status, '🟡')} {st.session_state.connection_status}")
 
