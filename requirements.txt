@@ -1,0 +1,8 @@
+streamlit>=1.19.0
+openai
+requests
+firebase-admin
+python-jose[cryptography]
+python-dotenv
+pandas
+bleach
