@@ -332,25 +332,26 @@ class LLMWrapper:
     def _initialize_client(self) -> None:
         try:
             if self.provider == LLMProvider.OPENAI:
-                api_key = self.config.get("api_key") or os.getenv("OPENAI_API_KEY")
+                # Check st.secrets first, then config, then environment variable
+                api_key = self.config.get("api_key") or st.secrets.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
                 if not api_key:
-                    raise Exception("OpenAI API key required!")
+                    raise Exception("OpenAI API key required! Please set it in Streamlit secrets or provide it manually.")
                 model = self.config.get("model", "gpt-4o-mini")
                 self.client = OpenAIClient(api_key, model)
             elif self.provider == LLMProvider.CLAUDE:
-                api_key = self.config.get("api_key") or os.getenv("ANTHROPIC_API_KEY")
+                api_key = self.config.get("api_key") or st.secrets.get("ANTHROPIC_API_KEY") or os.getenv("ANTHROPIC_API_KEY")
                 if not api_key:
                     raise Exception("Claude API key required!")
                 model = self.config.get("model", "claude-3-sonnet-20240229")
                 self.client = ClaudeClient(api_key, model)
             elif self.provider == LLMProvider.DEEPSEEK:
-                api_key = self.config.get("api_key") or os.getenv("DEEPSEEK_API_KEY")
+                api_key = self.config.get("api_key") or st.secrets.get("DEEPSEEK_API_KEY") or os.getenv("DEEPSEEK_API_KEY")
                 if not api_key:
                     raise Exception("DeepSeek API key required!")
                 model = self.config.get("model", "deepseek-chat")
                 self.client = DeepSeekClient(api_key, model)
             elif self.provider == LLMProvider.OPENROUTER:
-                api_key = self.config.get("api_key") or os.getenv("OPENROUTER_API_KEY")
+                api_key = self.config.get("api_key") or st.secrets.get("OPENROUTER_API_KEY") or os.getenv("OPENROUTER_API_KEY")
                 if not api_key:
                     raise Exception("OpenRouter API key required!")
                 model = self.config.get("model", "anthropic/claude-3-sonnet")
@@ -471,32 +472,35 @@ def init_session_state():
             st.session_state.connection_status = "Not Connected"
         else:
             try:
-                api_key = os.getenv("OPENAI_API_KEY")
+                # Prioritize st.secrets, then fallback to environment variable
+                api_key = st.secrets.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
                 if not api_key:
-                    st.error("OpenAI API key not found in environment variables!")
+                    st.error("OpenAI API key not found in Streamlit secrets or environment variables!")
                     st.session_state.connection_status = "Failed"
-                else:
-                    # Initialize LLMWrapper
-                    llm = LLMWrapper(
-                        provider=LLMProvider.OPENAI,
-                        api_key=api_key,
-                        model="gpt-4o-mini"
-                    )
-                    # Test the connection with a simple prompt
-                    try:
-                        test_response = llm.generate("Test connection", max_tokens=10)
-                        if test_response and "error" not in test_response.lower():
-                            st.session_state.llm = llm
-                            st.session_state.connection_status = "Connected"
-                        else:
-                            st.session_state.connection_status = "Failed"
-                            st.error("API test failed: Invalid response from OpenAI")
-                    except Exception as e:
+                    return
+                # Initialize LLMWrapper
+                llm = LLMWrapper(
+                    provider=LLMProvider.OPENAI,
+                    api_key=api_key,
+                    model="gpt-4o-mini"
+                )
+                # Test the connection with a simple prompt
+                try:
+                    test_response = llm.generate("Test connection", max_tokens=10)
+                    if test_response and "error" not in test_response.lower():
+                        st.session_state.llm = llm
+                        st.session_state.connection_status = "Connected"
+                    else:
                         st.session_state.connection_status = "Failed"
-                        st.error(f"API connection test failed: {str(e)}")
+                        st.error("API test failed: Invalid response from OpenAI")
+                except Exception as e:
+                    st.session_state.connection_status = "Failed"
+                    st.error(f"API connection test failed: {str(e)}")
             except Exception as e:
-                st.error(f"Failed to initialize LLM: {str(e)}")
                 st.session_state.connection_status = "Failed"
+                st.error(f"Failed to initialize LLM: {str(e)}")
+
+    # Initialize other session state variables
     if 'glossary' not in st.session_state:
         st.session_state.glossary = {}
     if 'connection_status' not in st.session_state:
