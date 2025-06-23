@@ -39,6 +39,9 @@ load_dotenv()
 # Load environment variables (optional for local fallback)
 load_dotenv()
 
+# Load environment variables (optional for local fallback)
+load_dotenv()
+
 # Initialize Firebase Admin SDK
 if not firebase_admin._apps:
     # Try to get service account from Streamlit Secrets as JSON content
