@@ -41,30 +41,41 @@ load_dotenv()
 
 # Load environment variables (optional for local fallback)
 load_dotenv()
-
 # Initialize Firebase Admin SDK
 if not firebase_admin._apps:
-    # Try to get service account from Streamlit Secrets as JSON content
-    service_account_json = st.secrets.get("firebase.SERVICE_ACCOUNT")
-    if service_account_json:
-        import json
-        try:
-            cred = credentials.Certificate(json.loads(service_account_json))
-        except json.JSONDecodeError as e:
-            raise ValueError(f"Invalid JSON in firebase.SERVICE_ACCOUNT: {str(e)}")
-    else:
-        # Fallback to file path from environment or Streamlit Secrets
-        service_account_path = os.getenv("FIREBASE_SERVICE_ACCOUNT_PATH") or st.secrets.get("FIREBASE_SERVICE_ACCOUNT_PATH")
+    try:
+        # Get service account from Streamlit Secrets as JSON content
+        service_account_json = st.secrets["firebase"]["SERVICE_ACCOUNT"]  # Fixed: Use proper nested access
+
+        if service_account_json:
+            try:
+                # Parse the JSON string from secrets
+                service_account_dict = json.loads(service_account_json)
+                cred = credentials.Certificate(service_account_dict)
+                firebase_admin.initialize_app(cred)
+                print("✅ Firebase initialized successfully with Streamlit Secrets")
+            except json.JSONDecodeError as e:
+                raise ValueError(f"Invalid JSON in firebase.SERVICE_ACCOUNT: {str(e)}")
+        else:
+            raise ValueError("SERVICE_ACCOUNT not found in firebase secrets")
+
+    except KeyError as e:
+        # Fallback to environment variable or file path
+        service_account_path = os.getenv("FIREBASE_SERVICE_ACCOUNT_PATH")
         if service_account_path and os.path.exists(service_account_path):
             cred = credentials.Certificate(service_account_path)
+            firebase_admin.initialize_app(cred)
+            print("✅ Firebase initialized with file path")
         else:
             raise ValueError(
-                "Firebase service account not found. Set 'firebase.SERVICE_ACCOUNT' in Streamlit Secrets "
-                "with the JSON content, or provide 'FIREBASE_SERVICE_ACCOUNT_PATH' with a valid file path."
+                "Firebase service account not found. Ensure 'firebase.SERVICE_ACCOUNT' "
+                "is properly set in Streamlit Secrets with valid JSON content."
             )
-    firebase_admin.initialize_app(cred)
-db = firestore.client()
+    except Exception as e:
+        raise ValueError(f"Firebase initialization failed: {str(e)}")
 
+# Get Firestore client
+db = firestore.client()
 # Configuration for easy maintenance
 class AppConfig:
     """Ustaad Jee's Knowledge Hub Configuration"""
