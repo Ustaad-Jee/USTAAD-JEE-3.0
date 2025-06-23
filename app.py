@@ -11,7 +11,6 @@ import io
 import time
 import bleach
 from typing import Tuple
-import base64
 import firebase_admin
 from firebase_admin import credentials, auth, firestore
 from dotenv import load_dotenv
@@ -333,7 +332,7 @@ class LLMWrapper:
         try:
             if self.provider == LLMProvider.OPENAI:
                 # Check st.secrets first, then config, then environment variable
-                api_key = self.config.get("api_key") or st.secrets.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
+                api_key = self.config.get("api_key") or st.secrets.get("OPENAI_API_KEY")
                 if not api_key:
                     raise Exception("OpenAI API key required! Please set it in Streamlit secrets or provide it manually.")
                 model = self.config.get("model", "gpt-4o-mini")
@@ -473,7 +472,7 @@ def init_session_state():
         else:
             try:
                 # Prioritize st.secrets, then fallback to environment variable
-                api_key = st.secrets.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
+                api_key = st.secrets.get("OPENAI_API_KEY")
                 if not api_key:
                     st.error("OpenAI API key not found in Streamlit secrets or environment variables!")
                     st.session_state.connection_status = "Failed"
