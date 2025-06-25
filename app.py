@@ -2,25 +2,18 @@ import streamlit as st
 import openai
 import requests
 import json
-from typing import Optional, Dict, Any, List, Tuple
+from typing import Optional, Dict, Any, List
 from enum import Enum
 import os
 from abc import ABC, abstractmethod
 import pandas as pd
 import io
 import time
-import firebase_admin
-from firebase_admin import credentials, auth
-from google.cloud.firestore_v1 import AsyncClient
-from google.cloud import firestore
-from dotenv import load_dotenv
-import PyPDF2
-import easyocr
-from pdf2image import convert_from_bytes
 import bleach
-import asyncio
-from functools import lru_cache
-
+from typing import Tuple
+import firebase_admin
+from firebase_admin import credentials, auth, firestore
+from dotenv import load_dotenv
 from auth import (
     sign_in_with_email_and_password,
     get_account_info,
@@ -29,59 +22,59 @@ from auth import (
     create_user_with_email_and_password,
     delete_user_account,
     raise_detailed_error
+
 )
 from firestore_utils import log_user_activity, store_chat_history, set_admin_user
+
+from firebase_admin import auth, firestore
+
+
+
 
 # Load environment variables
 load_dotenv()
 
-# Cache Firebase initialization
-@st.cache_resource
-def initialize_firebase():
-    if not firebase_admin._apps:
-        try:
-            service_account_json = st.secrets["firebase"]["SERVICE_ACCOUNT"]
-            service_account_dict = json.loads(service_account_json)
-            cred = credentials.Certificate(service_account_dict)
+# Initialize Firebase Admin SDK
+# Load environment variables (optional for local fallback)
+load_dotenv()
+
+# Load environment variables (optional for local fallback)
+load_dotenv()
+# Initialize Firebase Admin SDK
+if not firebase_admin._apps:
+    try:
+        # Get service account from Streamlit Secrets as JSON content
+        service_account_json = st.secrets["firebase"]["SERVICE_ACCOUNT"]  # Fixed: Use proper nested access
+
+        if service_account_json:
+            try:
+                # Parse the JSON string from secrets
+                service_account_dict = json.loads(service_account_json)
+                cred = credentials.Certificate(service_account_dict)
+                firebase_admin.initialize_app(cred)
+                print("✅ Firebase initialized successfully with Streamlit Secrets")
+            except json.JSONDecodeError as e:
+                raise ValueError(f"Invalid JSON in firebase.SERVICE_ACCOUNT: {str(e)}")
+        else:
+            raise ValueError("SERVICE_ACCOUNT not found in firebase secrets")
+
+    except KeyError as e:
+        # Fallback to environment variable or file path
+        service_account_path = os.getenv("FIREBASE_SERVICE_ACCOUNT_PATH")
+        if service_account_path and os.path.exists(service_account_path):
+            cred = credentials.Certificate(service_account_path)
             firebase_admin.initialize_app(cred)
-            return AsyncClient()
-        except Exception as e:
-            st.error(f"Firebase initialization failed: {str(e)}")
-            return None
-
-# Cache EasyOCR reader
-@st.cache_resource
-def initialize_easyocr():
-    try:
-        return easyocr.Reader(['en'], gpu=False)
+            print("✅ Firebase initialized with file path")
+        else:
+            raise ValueError(
+                "Firebase service account not found. Ensure 'firebase.SERVICE_ACCOUNT' "
+                "is properly set in Streamlit Secrets with valid JSON content."
+            )
     except Exception as e:
-        st.error(f"Failed to initialize EasyOCR: {str(e)}")
-        return None
+        raise ValueError(f"Firebase initialization failed: {str(e)}")
 
-# Initialize cached resources
-db = initialize_firebase()
-reader = initialize_easyocr()
-
-# Cache PDF extraction
-@st.cache_data
-def extract_pdf_text_cached(file_content: bytes, _file_name: str) -> str:
-    try:
-        text = ""
-        pdf_reader = PyPDF2.PdfReader(io.BytesIO(file_content))
-        for page in pdf_reader.pages:
-            page_text = page.extract_text()
-            if page_text:
-                text += page_text + "\n"
-        if not text.strip() and 'reader' in globals() and reader:
-            images = convert_from_bytes(file_content)
-            for image in images:
-                result = reader.readtext(image, detail=0, paragraph=True)
-                text += "\n".join(result) + "\n"
-        return bleach.clean(text.strip())
-    except Exception as e:
-        st.error(f"Failed to process PDF: {str(e)}")
-        return ""
-
+# Get Firestore client
+db = firestore.client()
 # Configuration for easy maintenance
 class AppConfig:
     """Ustaad Jee's Knowledge Hub Configuration"""
@@ -188,6 +181,7 @@ QUESTION:
 {question}
 ANSWER (in friendly English):"""
 
+
 class LLMProvider(Enum):
     OPENAI = "openai"
     CLAUDE = "claude"
@@ -195,15 +189,17 @@ class LLMProvider(Enum):
     OPENROUTER = "openrouter"
     LOCAL = "local"
 
+
 class BaseLLMClient(ABC):
     @abstractmethod
     def generate(self, prompt: str, **kwargs) -> str:
         pass
 
+
 class OpenAIClient(BaseLLMClient):
     def __init__(self, api_key: str, model: str = "gpt-4o-mini"):
         try:
-            self.client = openai.Client(api_key=api_key)
+            self.client = openai.OpenAI(api_key=api_key)
             self.model = model
         except Exception as e:
             raise Exception(f"Error connecting to OpenAI: {str(e)}")
@@ -219,6 +215,7 @@ class OpenAIClient(BaseLLMClient):
             return response.choices[0].message.content.strip()
         except Exception as e:
             raise Exception(f"OpenAI error: {str(e)}")
+
 
 class ClaudeClient(BaseLLMClient):
     def __init__(self, api_key: str, model: str = "claude-3-sonnet-20240229"):
@@ -245,6 +242,7 @@ class ClaudeClient(BaseLLMClient):
         except Exception as e:
             raise Exception(f"Claude error: {str(e)}")
 
+
 class DeepSeekClient(BaseLLMClient):
     def __init__(self, api_key: str, model: str = "deepseek-chat"):
         self.api_key = api_key
@@ -269,6 +267,7 @@ class DeepSeekClient(BaseLLMClient):
             return result["choices"][0]["message"]["content"].strip()
         except Exception as e:
             raise Exception(f"DeepSeek error: {str(e)}")
+
 
 class OpenRouterClient(BaseLLMClient):
     def __init__(self, api_key: str, model: str = "anthropic/claude-3-sonnet"):
@@ -296,6 +295,7 @@ class OpenRouterClient(BaseLLMClient):
             return result["choices"][0]["message"]["content"].strip()
         except Exception as e:
             raise Exception(f"OpenRouter error: {str(e)}")
+
 
 class LocalLLMClient(BaseLLMClient):
     def __init__(self, base_url: str = "http://localhost:11434", model: str = "llama3.2:3b"):
@@ -331,9 +331,10 @@ class LLMWrapper:
     def _initialize_client(self) -> None:
         try:
             if self.provider == LLMProvider.OPENAI:
+                # Check st.secrets first, then config, then environment variable
                 api_key = self.config.get("api_key") or st.secrets.get("OPENAI_API_KEY")
                 if not api_key:
-                    raise Exception("OpenAI API key required!")
+                    raise Exception("OpenAI API key required! Please set it in Streamlit secrets or provide it manually.")
                 model = self.config.get("model", "gpt-4o-mini")
                 self.client = OpenAIClient(api_key, model)
             elif self.provider == LLMProvider.CLAUDE:
@@ -438,13 +439,16 @@ class LLMWrapper:
                 document_text=document_text,
                 question=question
             )
+
         return self.generate(prompt, temperature=0.3, max_tokens=2000, **kwargs)
+
 
 class FeedbackDB:
     def __init__(self):
+        # Initialize Firestore feedback collection (no in-memory storage needed)
         pass
 
-    async def store_feedback(self, user_id: str, question: str, response: str, language: str, rating: str):
+    def store_feedback(self, question: str, response: str, language: str, rating: str):
         feedback_entry = {
             "question": bleach.clean(question),
             "response": bleach.clean(response),
@@ -453,73 +457,74 @@ class FeedbackDB:
             "timestamp": firestore.SERVER_TIMESTAMP
         }
         try:
-            await db.collection("feedback").document(user_id).collection("entries").add(feedback_entry)
-            await log_user_activity_async(user_id, "submit_feedback", {"rating": rating})
+            user_id = st.session_state.user_info['localId']
+            db.collection("feedback").document(user_id).collection("entries").add(feedback_entry)
+            log_user_activity(user_id, "submit_feedback", {"rating": rating})
         except Exception as e:
             st.error(f"Error saving feedback: {str(e)}")
 
-async def log_user_activity_async(user_id: str, action: str, details: dict):
-    try:
-        await db.collection("users").document(user_id).collection("logs").add({
-            "action": action,
-            "details": details,
-            "timestamp": firestore.SERVER_TIMESTAMP,
-            "email": st.session_state.user_info.get('email', 'Unknown')
-        })
-    except Exception as e:
-        print(f"Error logging activity: {str(e)}")
-
-async def store_chat_history_async(user_id: str, chat_entry: dict):
-    try:
-        await db.collection("users").document(user_id).collection("chats").add({
-            "query": chat_entry["query"],
-            "response": chat_entry["response"],
-            "language": chat_entry["language"],
-            "type": chat_entry["type"],
-            "timestamp": firestore.SERVER_TIMESTAMP
-        })
-    except Exception as e:
-        print(f"Error storing chat history: {str(e)}")
 
 def init_session_state():
-    defaults = {
-        'llm': None,
-        'connection_status': "Not Connected",
-        'glossary': {},
-        'results': {},
-        'glossary_updated': False,
-        'chat_history': [],
-        'feedback_db': FeedbackDB(),
-        'uploaded_document': "",
-        'context_text': "",
-        'auth_warning': "",
-        'auth_success': "",
-        'is_admin': False
-    }
-    for key, value in defaults.items():
-        if key not in st.session_state:
-            st.session_state[key] = value
+    if 'llm' not in st.session_state:
+        if st.session_state.get('is_admin', False):
+            st.session_state.llm = None
+            st.session_state.connection_status = "Not Connected"
+        else:
+            try:
+                # Prioritize st.secrets, then fallback to environment variable
+                api_key = st.secrets.get("OPENAI_API_KEY")
+                if not api_key:
+                    st.error("OpenAI API key not found in Streamlit secrets or environment variables!")
+                    st.session_state.connection_status = "Failed"
+                    return
+                # Initialize LLMWrapper
+                llm = LLMWrapper(
+                    provider=LLMProvider.OPENAI,
+                    api_key=api_key,
+                    model="gpt-4o-mini"
+                )
+                # Test the connection with a simple prompt
+                try:
+                    test_response = llm.generate("Test connection", max_tokens=10)
+                    if test_response and "error" not in test_response.lower():
+                        st.session_state.llm = llm
+                        st.session_state.connection_status = "Connected"
+                    else:
+                        st.session_state.connection_status = "Failed"
+                        st.error("API test failed: Invalid response from OpenAI")
+                except Exception as e:
+                    st.session_state.connection_status = "Failed"
+                    st.error(f"API connection test failed: {str(e)}")
+            except Exception as e:
+                st.session_state.connection_status = "Failed"
+                st.error(f"Failed to initialize LLM: {str(e)}")
 
-    if st.session_state.llm is None and not st.session_state.get('is_admin', False):
-        try:
-            api_key = st.secrets.get("OPENAI_API_KEY")
-            if not api_key:
-                st.error("OpenAI API key not found!")
-                st.session_state.connection_status = "Failed"
-                return
-            llm = LLMWrapper(provider=LLMProvider.OPENAI, api_key=api_key, model="gpt-4o-mini")
-            test_response = llm.generate("Test connection", max_tokens=10)
-            if test_response and "error" not in test_response.lower():
-                st.session_state.llm = llm
-                st.session_state.connection_status = "Connected"
-            else:
-                st.session_state.connection_status = "Failed"
-                st.error("API test failed: Invalid response")
-        except Exception as e:
-            st.session_state.connection_status = "Failed"
-            st.error(f"Failed to initialize LLM: {str(e)}")
+    # Initialize other session state variables
+    if 'glossary' not in st.session_state:
+        st.session_state.glossary = {}
+    if 'connection_status' not in st.session_state:
+        st.session_state.connection_status = "Not Connected"
+    if 'results' not in st.session_state:
+        st.session_state.results = {}
+    if 'glossary_updated' not in st.session_state:
+        st.session_state.glossary_updated = False
+    if 'chat_history' not in st.session_state:
+        st.session_state.chat_history = []
+    if 'feedback_db' not in st.session_state:
+        st.session_state.feedback_db = FeedbackDB()
+    if 'uploaded_document' not in st.session_state:
+        st.session_state.uploaded_document = ""
+    if 'context_text' not in st.session_state:
+        st.session_state.context_text = ""
+    if 'auth_warning' not in st.session_state:
+        st.session_state.auth_warning = ""
+    if 'auth_success' not in st.session_state:
+        st.session_state.auth_success = ""
+    if 'is_admin' not in st.session_state:
+        st.session_state.is_admin = False
 
 def create_auth_interface():
+    # Custom CSS for better styling
     st.markdown("""
     <style>
     .auth-container {
@@ -528,6 +533,7 @@ def create_auth_interface():
         padding: 0.5rem 1rem;
         margin-top: -14rem;
     }
+
     .auth-title {
         text-align: center;
         color: #1f2937;
@@ -535,6 +541,7 @@ def create_auth_interface():
         font-weight: 600;
         margin-bottom: 2rem;
     }
+
     .stTextInput > div > div > input {
         border-radius: 8px;
         border: 2px solid #e5e7eb;
@@ -542,10 +549,12 @@ def create_auth_interface():
         font-size: 1rem;
         transition: border-color 0.2s;
     }
+
     .stTextInput > div > div > input:focus {
         border-color: #3b82f6;
         box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
     }
+
     .stButton > button {
         width: 100%;
         border-radius: 8px;
@@ -558,19 +567,23 @@ def create_auth_interface():
         transition: all 0.2s;
         margin-top: 1rem;
     }
+
     .stButton > button:hover {
         background: linear-gradient(135deg, #1d4ed8 0%, #1e40af 100%);
         transform: translateY(-1px);
         box-shadow: 0 4px 12px rgba(59, 130, 246, 0.4);
     }
+
     .auth-links {
         text-align: center;
         margin-top: 1.5rem;
     }
+
     .auth-links .stButton {
         display: inline-block;
         margin: 0 0.5rem;
     }
+
     .auth-links .stButton > button {
         background: none !important;
         border: none !important;
@@ -588,6 +601,7 @@ def create_auth_interface():
         width: auto !important;
         margin: 0 !important;
     }
+
     .auth-links .stButton > button:hover {
         color: #1d4ed8 !important;
         text-decoration: underline !important;
@@ -595,20 +609,24 @@ def create_auth_interface():
         transform: none !important;
         box-shadow: none !important;
     }
+
     .auth-links .stButton > button:focus {
         outline: 2px solid #3b82f6 !important;
         outline-offset: 2px !important;
         box-shadow: none !important;
     }
+
     .auth-divider {
         margin: 1rem 0;
         color: #6b7280;
         font-size: 0.9rem;
     }
+
     .back-link {
         text-align: center;
         margin-bottom: 1rem;
     }
+
     .back-link .stButton > button {
         background: none !important;
         border: none !important;
@@ -624,6 +642,7 @@ def create_auth_interface():
         margin: 0 !important;
         box-shadow: none !important;
     }
+
     .back-link .stButton > button:hover {
         color: #3b82f6 !important;
         text-decoration: underline !important;
@@ -631,12 +650,14 @@ def create_auth_interface():
         transform: none !important;
         box-shadow: none !important;
     }
+
     .form-description {
         text-align: center;
         color: #6b7280;
         margin-bottom: 1.5rem;
         font-size: 0.95rem;
     }
+
     .stAlert {
         border-radius: 8px;
         margin-top: 1rem;
@@ -644,11 +665,17 @@ def create_auth_interface():
     </style>
     """, unsafe_allow_html=True)
 
+    # Center the form using columns
     col1, col2, col3 = st.columns([1, 2, 1])
+
     with col2:
         st.markdown('<div class="auth-container">', unsafe_allow_html=True)
+
+        # Initialize session state for auth mode
         if 'auth_mode' not in st.session_state:
             st.session_state.auth_mode = 'signin'
+
+        # Back to Sign In link (for sign up and reset password modes)
         if st.session_state.auth_mode != 'signin':
             st.markdown('<div class="back-link">', unsafe_allow_html=True)
             if st.button("← Back to Sign In", key="back_to_signin"):
@@ -656,10 +683,12 @@ def create_auth_interface():
                 st.rerun()
             st.markdown('</div>', unsafe_allow_html=True)
 
+        # Sign In Form
         if st.session_state.auth_mode == 'signin':
             st.markdown('<h1 class="auth-title">Sign In</h1>', unsafe_allow_html=True)
             st.markdown('<p class="form-description">Welcome back! Please sign in to your account.</p>',
                         unsafe_allow_html=True)
+
             with st.form("sign_in_form", clear_on_submit=False):
                 email = st.text_input(
                     "Email Address",
@@ -672,11 +701,13 @@ def create_auth_interface():
                     placeholder="Enter your password",
                     label_visibility="collapsed"
                 )
+
                 submit = st.form_submit_button(
                     "Sign In",
                     use_container_width=True,
                     type="primary"
                 )
+
                 if submit:
                     if not email or not password:
                         st.error("Please fill in all fields")
@@ -685,6 +716,7 @@ def create_auth_interface():
                             with st.spinner("Signing you in..."):
                                 id_token = sign_in_with_email_and_password(email, password)['idToken']
                                 user_info = get_account_info(id_token)["users"][0]
+
                                 if not user_info["emailVerified"]:
                                     send_email_verification(id_token)
                                     st.session_state.auth_warning = 'Check your email to verify your account'
@@ -694,12 +726,7 @@ def create_auth_interface():
                                     user = auth.get_user(user_info['localId'])
                                     st.session_state.is_admin = user.custom_claims.get('admin',
                                                                                        False) if user.custom_claims else False
-                                    loop = asyncio.new_event_loop()
-                                    asyncio.set_event_loop(loop)
-                                    try:
-                                        loop.run_until_complete(log_user_activity_async(user_info['localId'], "login", {"email": user_info['email']}))
-                                    finally:
-                                        loop.close()
+                                    log_user_activity(user_info['localId'], "login", {"email": user_info['email']})
                                     st.success("Welcome! Redirecting...")
                                     st.rerun()
                         except requests.exceptions.HTTPError as error:
@@ -713,22 +740,25 @@ def create_auth_interface():
                             print(error)
                             st.session_state.auth_warning = 'Connection error. Please try again later.'
 
+            # Links for Reset Password and Sign Up
             st.markdown('<div class="auth-links">', unsafe_allow_html=True)
-            col1, col2, col3 = st.columns([1, 1, 1])
-            with col1:
-                if st.button("Create Account", key="switch_to_signup"):
-                    st.session_state.auth_mode = 'signup'
-                    st.rerun()
-            with col2:
-                if st.button("Forgot Password?", key="switch_to_reset"):
+            col_a, col_b = st.columns(2)
+            with col_a:
+                if st.button("Forgot Password?", key="forgot_password_link"):
                     st.session_state.auth_mode = 'reset'
+                    st.rerun()
+            with col_b:
+                if st.button("Create Account", key="create_account_link"):
+                    st.session_state.auth_mode = 'signup'
                     st.rerun()
             st.markdown('</div>', unsafe_allow_html=True)
 
+        # Sign Up Form
         elif st.session_state.auth_mode == 'signup':
             st.markdown('<h1 class="auth-title">Create Account</h1>', unsafe_allow_html=True)
             st.markdown('<p class="form-description">Join us today! Create your account in just a few steps.</p>',
                         unsafe_allow_html=True)
+
             with st.form("sign_up_form", clear_on_submit=False):
                 email = st.text_input(
                     "Email Address",
@@ -741,11 +771,13 @@ def create_auth_interface():
                     placeholder="Choose a strong password (min 6 characters)",
                     label_visibility="collapsed"
                 )
+
                 submit = st.form_submit_button(
                     "Create Account",
                     use_container_width=True,
                     type="primary"
                 )
+
                 if submit:
                     if not email or not password:
                         st.error("Please fill in all fields")
@@ -758,13 +790,8 @@ def create_auth_interface():
                                 user_info = get_account_info(id_token)["users"][0]
                                 send_email_verification(id_token)
                                 st.session_state.auth_success = 'Account created! Check your inbox to verify your email.'
-                                loop = asyncio.new_event_loop()
-                                asyncio.set_event_loop(loop)
-                                try:
-                                    loop.run_until_complete(log_user_activity_async(user_info['localId'], "account_creation",
-                                                                                    {"email": user_info['email']}))
-                                finally:
-                                    loop.close()
+                                log_user_activity(user_info['localId'], "account_creation",
+                                                  {"email": user_info['email']})
                         except requests.exceptions.HTTPError as error:
                             error_message = json.loads(error.args[1])['error']['message']
                             if error_message == "EMAIL_EXISTS":
@@ -778,22 +805,26 @@ def create_auth_interface():
                             print(error)
                             st.session_state.auth_warning = 'Connection error. Please try again later.'
 
+        # Reset Password Form
         elif st.session_state.auth_mode == 'reset':
             st.markdown('<h1 class="auth-title">Reset Password</h1>', unsafe_allow_html=True)
             st.markdown(
                 '<p class="form-description">Enter your email address and we\'ll send you a link to reset your password.</p>',
                 unsafe_allow_html=True)
+
             with st.form("reset_password_form", clear_on_submit=False):
                 email = st.text_input(
                     "Email Address",
-                    placeholder="Email Address",
-                    label_visibility="email"
+                    placeholder="Enter your registered email",
+                    label_visibility="collapsed"
                 )
+
                 submit = st.form_submit_button(
-                    "Send Reset Password Link",
+                    "Send Reset Link",
                     use_container_width=True,
                     type="primary"
                 )
+
                 if submit:
                     if not email:
                         st.error("Please enter your email address")
@@ -809,92 +840,81 @@ def create_auth_interface():
                             else:
                                 st.session_state.auth_warning = 'Something went wrong. Please try again later.'
                         except Exception:
-                            st.session_state.auth_warning('Connection error. Please try again later.')
+                            st.session_state.auth_warning = 'Connection error. Please try again later.'
 
+        # Display messages
         if st.session_state.get('auth_warning'):
             st.error(st.session_state.auth_warning)
             st.session_state.auth_warning = ""
         if st.session_state.get('auth_success'):
             st.success(st.session_state.auth_success)
             st.session_state.auth_success = ""
+
         st.markdown('</div>', unsafe_allow_html=True)
 
+
 def create_admin_interface():
+    """Create admin interface for managing users, viewing logs, and chat history."""
+    # Validate session state
     if not st.session_state.get('user_info') or not st.session_state.get('id_token'):
-        st.error("Session expired. Please sign in again.")
+        st.error("Session expired. Please log in again.")
         return
     if not st.session_state.get('is_admin', False):
         st.warning("You do not have admin access.")
         return
 
+    db = firestore.client()
     st.markdown("### Admin Panel")
     with st.expander("Admin Actions", expanded=False):
+        # Grant Admin Access
         st.markdown("**Grant Admin Access**")
         admin_email = st.text_input("Enter email to grant admin access", key="admin_email_input")
         if st.button("Grant Admin Access", key="grant_admin_btn"):
             try:
                 set_admin_user(admin_email)
-                st.success(f"Admin access granted for {admin_email}.")
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                try:
-                    loop.run_until_complete(log_user_activity_async(st.session_state.user_info['localId'], "grant_admin",
-                                                                    {"email": admin_email}))
-                finally:
-                    loop.close()
             except Exception as e:
                 st.error(f"Error granting admin access: {str(e)}")
 
+        # Revoke Admin Access
         st.markdown("**Revoke Admin Access**")
         revoke_email = st.text_input("Enter email to revoke admin access", key="revoke_email_input")
-        if st.button("Revoke Admin Access", key="reovke_admin_btn"):
+        if st.button("Revoke Admin Access", key="revoke_admin_btn"):
             try:
                 user = auth.get_user_by_email(revoke_email)
                 auth.set_custom_user_claims(user.uid, {"admin": False})
                 st.success(f"Admin access revoked for {revoke_email}. They must log out and log back in.")
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                try:
-                    loop.run_until_complete(log_user_activity_async(st.session_state.user_info['localId'], "revoke_admin",
-                                                                    {"email": revoke_email}))
-                finally:
-                    loop.close()
+                log_user_activity(st.session_state.user_info['localId'], "revoke_admin", {"email": revoke_email})
             except auth.UserNotFoundError:
                 st.error("Error: User not found or invalid email.")
             except Exception as e:
                 st.error(f"Error revoking admin access: {str(e)}")
 
+        # View Admin Logs
         st.markdown("**View All User Activities (Admin Logs)**")
         try:
-            filter_email = st.text_input("Filter by Email", key="filter_by_email")
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            try:
-                query = db.collection("admin_logs").order_by("timestamp", direction=firestore.Query.DESCENDING).limit(50)
-                if filter_email:
-                    query = query.where("email", ">=", filter_email.lower()).where("email", "<=", filter_email.lower() + "\uf8ff")
-                logs = loop.run_until_complete(query.get())
-                log_data = []
-                for log in logs:
-                    log_dict = log.to_dict()
-                    email = log_dict.get('email', 'Unknown')
-                    if not filter_email or email.lower().find(filter_email.lower()) != -1:
-                        log_data.append({
-                            "User ID": log_dict['user_id'],
-                            "Email": email,
-                            "Action": log_dict['action'],
-                            "Details": str(log_dict['details']),
-                            "Timestamp": log_dict['timestamp']
-                        })
-                if log_data:
-                    st.dataframe(pd.DataFrame(log_data), use_container_width=True)
-                else:
-                    st.info("No admin logs available.")
-            finally:
-                loop.close()
+            filter_email = st.text_input("Filter by Email", key="log_filter_email")
+            query = db.collection("admin_logs").order_by("timestamp", direction=firestore.Query.DESCENDING).limit(50)
+            logs = query.get()
+            log_data = []
+            for log in logs:
+                log_dict = log.to_dict()
+                email = log_dict.get('email', 'Unknown')
+                if not filter_email or email.lower().find(filter_email.lower()) != -1:
+                    log_data.append({
+                        "User ID": log_dict['user_id'],
+                        "Email": email,
+                        "Action": log_dict['action'],
+                        "Details": str(log_dict['details']),
+                        "Timestamp": log_dict['timestamp']
+                    })
+            if log_data:
+                st.dataframe(pd.DataFrame(log_data), use_container_width=True)
+            else:
+                st.info("No admin logs available.")
         except Exception as e:
             st.error(f"Error fetching admin logs: {str(e)}")
 
+        # View User-Specific Logs
         st.markdown("**View User-Specific Logs**")
         try:
             user_log_filter_email = st.text_input("Filter User Logs by Email", key="user_log_filter_email")
@@ -902,28 +922,23 @@ def create_admin_interface():
             users_with_logs = db.collection_group("logs").limit(1).get()
             if users_with_logs:
                 all_users = {user.uid: user.email for user in auth.list_users().iterate_all()}
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                try:
-                    all_logs_query = db.collection_group("logs").order_by("timestamp",
-                                                                          direction=firestore.Query.DESCENDING).limit(50)
-                    all_logs = loop.run_until_complete(all_logs_query.get())
-                    for log_doc in all_logs:
-                        path_parts = log_doc.reference.path.split('/')
-                        if len(path_parts) >= 2:
-                            user_id = path_parts[1]
-                            user_email = all_users.get(user_id, 'Unknown')
-                            if not user_log_filter_email or user_email.lower().find(user_log_filter_email.lower()) != -1:
-                                log_dict = log_doc.to_dict()
-                                user_log_data.append({
-                                    "User ID": user_id,
-                                    "Email": user_email,
-                                    "Action": log_dict.get('action', ''),
-                                    "Details": str(log_dict.get('details', '')),
-                                    "Timestamp": log_dict.get('timestamp')
-                                })
-                finally:
-                    loop.close()
+                all_logs_query = db.collection_group("logs").order_by("timestamp",
+                                                                      direction=firestore.Query.DESCENDING).limit(50)
+                all_logs = all_logs_query.get()
+                for log_doc in all_logs:
+                    path_parts = log_doc.reference.path.split('/')
+                    if len(path_parts) >= 2:
+                        user_id = path_parts[1]
+                        user_email = all_users.get(user_id, 'Unknown')
+                        if not user_log_filter_email or user_email.lower().find(user_log_filter_email.lower()) != -1:
+                            log_dict = log_doc.to_dict()
+                            user_log_data.append({
+                                "User ID": user_id,
+                                "Email": user_email,
+                                "Action": log_dict.get('action', ''),
+                                "Details": str(log_dict.get('details', '')),
+                                "Timestamp": log_dict.get('timestamp')
+                            })
             if user_log_data:
                 st.dataframe(pd.DataFrame(user_log_data), use_container_width=True)
             else:
@@ -931,6 +946,7 @@ def create_admin_interface():
         except Exception as e:
             st.error(f"Error fetching user logs: {str(e)}")
 
+        # View User Chat History
         st.markdown("**View User Chat History**")
         try:
             chat_filter_email = st.text_input("Filter Chat History by Email", key="chat_filter_email")
@@ -938,30 +954,25 @@ def create_admin_interface():
             chats_sample = db.collection_group("chats").limit(1).get()
             if chats_sample:
                 all_users = {user.uid: user.email for user in auth.list_users().iterate_all()}
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                try:
-                    all_chats_query = db.collection_group("chats").order_by("timestamp",
-                                                                            direction=firestore.Query.DESCENDING).limit(50)
-                    all_chats = loop.run_until_complete(all_chats_query.get())
-                    for chat_doc in all_chats:
-                        path_parts = chat_doc.reference.path.split('/')
-                        if len(path_parts) >= 2:
-                            user_id = path_parts[1]
-                            user_email = all_users.get(user_id, 'Unknown')
-                            if not chat_filter_email or user_email.lower().find(chat_filter_email.lower()) != -1:
-                                chat_dict = chat_doc.to_dict()
-                                chat_data.append({
-                                    "User ID": user_id,
-                                    "Email": user_email,
-                                    "Query": chat_dict.get('query', ''),
-                                    "Response": chat_dict.get('response', ''),
-                                    "Language": chat_dict.get('language', ''),
-                                    "Type": chat_dict.get('type', ''),
-                                    "Timestamp": chat_dict.get('timestamp')
-                                })
-                finally:
-                    loop.close()
+                all_chats_query = db.collection_group("chats").order_by("timestamp",
+                                                                        direction=firestore.Query.DESCENDING).limit(50)
+                all_chats = all_chats_query.get()
+                for chat_doc in all_chats:
+                    path_parts = chat_doc.reference.path.split('/')
+                    if len(path_parts) >= 2:
+                        user_id = path_parts[1]
+                        user_email = all_users.get(user_id, 'Unknown')
+                        if not chat_filter_email or user_email.lower().find(chat_filter_email.lower()) != -1:
+                            chat_dict = chat_doc.to_dict()
+                            chat_data.append({
+                                "User ID": user_id,
+                                "Email": user_email,
+                                "Query": chat_dict.get('query', ''),
+                                "Response": chat_dict.get('response', ''),
+                                "Language": chat_dict.get('language', ''),
+                                "Type": chat_dict.get('type', ''),
+                                "Timestamp": chat_dict.get('timestamp')
+                            })
             if chat_data:
                 st.dataframe(pd.DataFrame(chat_data), use_container_width=True)
             else:
@@ -970,14 +981,17 @@ def create_admin_interface():
             st.error(f"Error fetching chat history: {str(e)}")
 
 def create_llm_configuration_section():
-    st.sidebar.markdown("### Configure Ustaad Jee's Brain 🧠")
+    st.markdown("### Configure Ustaad Jee's Brain 🧠")
+
     if not st.session_state.get('is_admin', False):
+        # Non-admin users: Display connection status only
         status_color = {"Connected": "🟢", "Not Connected": "🟡", "Failed": "🔴"}
-        st.sidebar.info(f"Status: {status_color.get(st.session_state.connection_status, '🟡')} {st.session_state.connection_status}")
-        st.sidebar.markdown("Using OpenAI GPT-4o-mini (default configuration).")
+        st.info(f"Status: {status_color.get(st.session_state.connection_status, '🟡')} {st.session_state.connection_status}")
+        st.markdown("Using OpenAI GPT-4o-mini (default configuration).")
         return
 
-    col1, col2 = st.sidebar.columns([1, 1])
+    # Admin users: Full configuration options
+    col1, col2 = st.columns([1, 1])
     with col1:
         provider_options = {
             "OpenAI (GPT)": LLMProvider.OPENAI,
@@ -989,16 +1003,14 @@ def create_llm_configuration_section():
         selected_provider = st.selectbox(
             "Select Brain",
             list(provider_options.keys()),
-            help="Choose the AI provider for Ustaad Jee.",
-            key="select_brain"
+            help="Choose the AI provider for Ustaad Jee."
         )
         provider_enum = provider_options[selected_provider]
         available_models = AppConfig.MODELS.get(selected_provider, [])
         selected_model = st.selectbox(
             "Select Model",
             available_models,
-            help="Pick a model for Ustaad Jee's brain.",
-            key="select_model"
+            help="Pick a model for Ustaad Jee's brain."
         )
     with col2:
         if selected_provider != "Local LLM":
@@ -1006,18 +1018,16 @@ def create_llm_configuration_section():
                 "API Key",
                 type="password",
                 placeholder="Enter your API key",
-                help="Required to connect to the AI provider.",
-                key="api_key_input"
+                help="Required to connect to the AI provider."
             )
         else:
             api_key = None
             base_url = st.text_input(
                 "Local Server URL",
                 value="http://localhost:11434",
-                help="URL where the local LLM is running.",
-                key="base_url_input"
+                help="URL where the local LLM is running."
             )
-        if st.button("Test Connection", type="primary", key="test_connection_btn"):
+        if st.button("Test Connection", type="secondary", key="test_connection_btn"):
             try:
                 config = {"model": selected_model}
                 if selected_provider != "Local LLM":
@@ -1028,20 +1038,15 @@ def create_llm_configuration_section():
                 else:
                     config["base_url"] = base_url
                 with st.spinner("Testing connection..."):
-                    test_llm = LLMWrapper(provider=provider_enum, **config)
+                    test_llm = LLMWrapper(provider_enum, **config)
                     if test_llm.client:
                         test_response = test_llm.generate("Hello", max_tokens=10)
                         if test_response:
                             st.success("Connection successful!")
                             st.session_state.connection_status = "Connected"
                             st.session_state.llm = test_llm
-                            loop = asyncio.new_event_loop()
-                            asyncio.set_event_loop(loop)
-                            try:
-                                loop.run_until_complete(log_user_activity_async(st.session_state.user_info['localId'], "llm_connection",
-                                                                                {"provider": selected_provider, "model": selected_model}))
-                            finally:
-                                loop.close()
+                            log_user_activity(st.session_state.user_info['localId'], "llm_connection",
+                                              {"provider": selected_provider, "model": selected_model})
                         else:
                             st.error("Connection failed!")
                             st.session_state.connection_status = "Failed"
@@ -1057,40 +1062,35 @@ def create_llm_configuration_section():
             if selected_provider != "Local LLM":
                 if api_key:
                     config["api_key"] = api_key
-                    st.session_state.llm = LLMWrapper(provider=provider_enum, **config)
+                    st.session_state.llm = LLMWrapper(provider_enum, **config)
             else:
                 config["base_url"] = base_url
-                st.session_state.llm = LLMWrapper(provider=provider_enum, **config)
+                st.session_state.llm = LLMWrapper(provider_enum, **config)
         except:
             pass
 
     status_color = {"Connected": "🟢", "Not Connected": "🟡", "Failed": "🔴"}
-    st.sidebar.info(f"Status: {status_color.get(st.session_state.connection_status, '🟡')} {st.session_state.connection_status}")
+    st.info(f"Status: {status_color.get(st.session_state.connection_status, '🟡')} {st.session_state.connection_status}")
+
 
 def create_glossary_section():
     st.markdown("### Ustaad Jee's Glossary 📚")
     st.markdown("Add technical terms for Ustaad Jee to use!")
-    with st.form(key="glossary_form"):
-        col1, col2, col3 = st.columns([2, 2, 1])
-        with col1:
-            english_term = st.text_input("English Term", key="eng_term_input")
-            english_term = bleach.clean(english_term) if english_term else ""
-        with col2:
-            urdu_term = st.text_input("Urdu/Roman Urdu Term", key="urdu_term_input")
-            urdu_term = bleach.clean(urdu_term) if urdu_term else ""
-        with col3:
-            submit = st.form_submit_button("+ Add")
-        if submit:
+    col1, col2, col3 = st.columns([2, 2, 1])
+    with col1:
+        english_term = st.text_input("English Term", key="eng_term_input")
+        english_term = bleach.clean(english_term) if english_term else ""
+    with col2:
+        urdu_term = st.text_input("Urdu/Roman Urdu Term", key="urdu_term_input")
+        urdu_term = bleach.clean(urdu_term) if urdu_term else ""
+    with col3:
+        st.write("")
+        if st.button("+ Add", key="add_term_btn"):
             if english_term and urdu_term:
                 st.session_state.glossary[english_term]=urdu_term
                 st.success(f"Added: {english_term} → {urdu_term}")
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                try:
-                    loop.run_until_complete(log_user_activity_async(st.session_state.user_info['localId'], "add_glossary_term",
-                                                                    {"english_term": english_term, "urdu_term": urdu_term}))
-                finally:
-                    loop.close()
+                log_user_activity(st.session_state.user_info['localId'], "add_glossary_term",
+                                  {"english_term": english_term, "urdu_term": urdu_term})
                 st.rerun()
             else:
                 st.warning("Both terms are required!")
@@ -1111,9 +1111,9 @@ def create_glossary_section():
         )
 
     st.markdown("**Upload Glossary**")
-    merge_option = st.checkbox("Merge with existing terms (uncheck to replace)", value=True, key="merge_option")
+    merge_option = st.checkbox("Merge with existing terms (uncheck to replace)", value=True)
     uploaded_file = st.file_uploader(
-        label="Choose CSV file",
+        "Choose CSV file",
         type=["csv"],
         key=f"glossary_upload_{len(st.session_state.glossary)}",
         help="CSV must have 'English Term' and 'Urdu Term' columns."
@@ -1121,58 +1121,64 @@ def create_glossary_section():
 
     if uploaded_file is not None:
         try:
-            file_size = uploaded_file.size if hasattr(uploaded_file, 'size') else False
+            file_size = uploaded_file.size if hasattr(uploaded_file, 'size') else 0
             if file_size > 1024 * 1024:
                 st.error("File too large (max 1MB)!")
                 return
+
             uploaded_df = pd.read_csv(uploaded_file)
             required_columns = ["English Term", "Urdu Term"]
             if not all(col in uploaded_df.columns for col in required_columns):
                 st.error(f"CSV must have columns: {', '.join(required_columns)}")
                 st.info(f"Found columns: {', '.join(uploaded_df.columns)}")
                 return
+
             if len(uploaded_df) > 1000:
                 st.error("Too many terms (max 1000)!")
                 return
-            if st.button("Upload Terms", key="upload_terms_btn", type="primary"):
+
+            if st.button("Upload Terms", key="process_upload_btn", type="primary"):
                 try:
                     if not merge_option:
                         st.session_state.glossary = {}
+
                     added_count = 0
                     skipped_count = 0
+
                     for _, row in uploaded_df.iterrows():
                         english_term = str(row["English Term"]).strip()
                         urdu_term = str(row["Urdu Term"]).strip()
                         english_term = bleach.clean(english_term)
                         urdu_term = bleach.clean(urdu_term)
+
                         if english_term and urdu_term and english_term != 'nan' and urdu_term != 'nan':
                             if english_term not in st.session_state.glossary or not merge_option:
-                                st.session_state.glossary[english_term]] = st.session_state[urdu_term]
+                                st.session_state.glossary[english_term] = urdu_term
                                 added_count += 1
-                                else:
+                            else:
                                 skipped_count += 1
-                                if added_count > 0:
-                                    st.success(f"Added {added_count} new terms!")
-                                loop = asyncio.new_event_loop()
-                                asyncio.set_event_loop(loop)
-                        try:
-                            loop.run_until_complete(log_user_activity_async(st.session_state.user_info['localId'], "upload_glossary",
-                                                                            {"terms_added": added_count, "terms_skipped": skipped_count}))
-                        finally:
-                            loop.close()
+
+                    if added_count > 0:
+                        st.success(f"Added {added_count} new terms!")
+                        log_user_activity(st.session_state.user_info['localId'], "upload_glossary",
+                                          {"terms_added": added_count, "terms_skipped": skipped_count})
                     if skipped_count > 0:
                         st.info(f"Skipped {skipped_count} existing terms.")
+
                     time.sleep(0.5)
                     st.rerun()
+
                 except Exception as e:
                     st.error(f"Error: {str(e)}")
+
             else:
                 st.info(f"Ready to upload {len(uploaded_df)} terms. Click 'Upload Terms'!")
-                with st.expander("Preview", first 5):
+                with st.expander("Preview first 5 terms"):
                     st.dataframe(uploaded_df.head())
+
         except Exception as e:
             st.error(f"Failed to read CSV: {str(e)}")
-            st.info("Please ensure your CSV has 'English Term' and 'Urdu Term' columns!")
+            st.info("Ensure CSV has 'English Term' and 'Urdu Term' columns!")
 
     if st.session_state.glossary:
         st.markdown("**Current Glossary**")
@@ -1186,74 +1192,51 @@ def create_glossary_section():
                 if st.button("Remove", key=f"remove_{idx}", help="Remove this term"):
                     del st.session_state.glossary[eng]
                     st.success(f"Removed {eng}!")
-                    loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loop)
-                    try:
-                        loop.run_until_complete(log_user_activity_async(st.session_state.user_info['localId'], "remove_glossary_term",
-                                                                        {"english_term": eng}))
-                    finally:
-                        loop.close()
+                    log_user_activity(st.session_state.user_info['localId'], "remove_glossary_term",
+                                      {"english_term": eng})
                     st.rerun()
 
         col1, col2, col3 = st.columns([1, 1, 2])
         with col1:
-            if st.button("Clear All", type="primary", key="clear_all_btn"):
+            if st.button("Clear All", type="secondary", key="clear_all_btn"):
                 st.session_state.glossary = {}
-                st.info("Cleared Glossary!")
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                try:
-                    loop.run_until_complete(log_user_activity_async(st.session_state.user_info['localId'], "clear_glossary", {}))
-                finally:
-                    loop.close()
+                st.info("Glossary cleared!")
+                log_user_activity(st.session_state.user_info['localId'], "clear_glossary", {})
                 st.rerun()
         with col2:
             st.write(f"**Total: {len(st.session_state.glossary)} terms**")
 
+
 def create_input_interface() -> Tuple[str, str]:
     st.markdown("### Upload Your Document")
     uploaded_document = st.file_uploader(
-        label="Upload Document",
-        type=["txt", "pdf"],
-        help="Upload a plain text or PDF file for Ustaad Jee to process.",
+        "Upload Document",
+        type=["txt","pdf"],
+        help="Upload a plain text file for Ustaad Jee to process.",
         key="document_upload"
     )
     document_text = st.session_state.uploaded_document
     if uploaded_document:
         try:
-            file_size = uploaded_document.size
-            if file_size > 10 * 1024 * 1024:  # 10MB limit
-                st.error("File too large (max 10MB)!")
-            else:
-                file_content = uploaded_document.read()
-                file_ext = uploaded_document.name.lower().split('.')[-1]
-                if file_ext == 'pdf':
-                    document_text = extract_pdf_text_cached(file_content, uploaded_document.name)
-                else:
-                    document_text = uploaded_document.read().decode("utf-8").strip()
-                    document_text = bleach.clean(document_text)
-                st.session_state.uploaded_document = document_text
-                if st.session_state.get('user_info'):
-                    loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loop)
-                    try:
-                        loop.run_until_complete(log_user_activity_async(
-                            st.session_state.user_info['localId'],
-                            ["upload_document"],
-                            {"document_length": len(document_text), "file_type": file_ext}
-                        ))
-                    finally:
-                        loop.close()
-                    st.success(f"{file_ext.upper()} file uploaded successfully!")
+            document_text = uploaded_document.read().decode("utf-8").strip()
+            document_text = bleach.clean(document_text)
+            st.session_state.uploaded_document = document_text
+            if st.session_state.get('user_info'):
+                log_user_activity(
+                    st.session_state.user_info['localId'],
+                    "upload_document",
+                    {"document_length": len(document_text)}
+                )
+            st.success("Document uploaded successfully!")
         except Exception as e:
             st.error(f"Failed to read document: {str(e)}")
 
     document_text = st.text_area(
-        label="Or Paste Your Document Here",
-        value="document_text",
-        height="300",
+        "Or Paste Your Document Here",
+        value=document_text,
+        height=300,
         placeholder="Paste your document text here...",
-        help="text_area_document_type",
+        help="Type or paste the document for Ustaad Jee.",
         key="document_text_input"
     )
     document_text = bleach.clean(document_text.strip()) if document_text else ""
@@ -1261,60 +1244,46 @@ def create_input_interface() -> Tuple[str, str]:
 
     st.markdown("### Upload Additional Context")
     uploaded_context = st.file_uploader(
-        label="Upload Context",
-        type=["txt", "pdf"],
-        help="Upload a plain text or PDF file containing additional context for Ustaad Jee.",
+        "Upload Context",
+        type=["txt"],
+        help="Upload a plain text file containing additional context for Ustaad Jee.",
         key="context_upload"
     )
     context_text = st.session_state.context_text
     if uploaded_context:
         try:
-            file_size = uploaded_context.size
-            if file_size > 10 * 1024 * 1024:  # 10MB limit
-                st.error("File too large (max 10MB)!")
-            else:
-                file_content = uploaded_context.read()
-                file_ext = uploaded_context.name.lower().split('.')[-1]
-                if file_ext == 'pdf':
-                    context_text = extract_pdf_text_cached(file_content, uploaded_context.name)
-                else:
-                    context_text = uploaded_context.read().decode("context_text").strip()
-                    context_text = bleach.clean(context_text)
-                st.session_state.context_text = context_text
-                if st.session_state.get('user_info'):
-                    loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loop)
-                    try:
-                        loop.run_until_complete(log_user_activity_async(
-                            st.session_state.user_info['local_id'],
-                            "upload_context_action",
-                            {"context_length": len(context_text), "file_type": file_ext}
-                        ))
-                    finally:
-                        loop.close()
-                    st.success("f"{file_ext.success(f"{success_type.upper()} uploaded successfully!")"}")
-
-            except Exception as e:
-            st.error("f"Failed to read context file: {str(e)}"')
-
-            context_text = st.text_area(
-                label="Additional Context",
-                value="context_text",
-                height="200",
-                placeholder="Type or paste your context here...",
-                help="Description about your document",
-                key="context_text_input"
-            )
-            context_text = bleach.clean(context_text.strip()) if context_text else ""
+            context_text = uploaded_context.read().decode("utf-8").strip()
+            context_text = bleach.clean(context_text)
             st.session_state.context_text = context_text
+            if st.session_state.get('user_info'):
+                log_user_activity(
+                    st.session_state.user_info['localId'],
+                    "upload_context",
+                    {"context_length": len(context_text)}
+                )
+            st.success("Context uploaded successfully!")
+        except Exception as e:
+            st.error(f"Failed to read context file: {str(e)}")
+
+    context_text = st.text_area(
+        "Additional Context",
+        value=context_text,
+        height=200,
+        placeholder="Type or paste your context here...",
+        help="Description about your document",
+        key="context_text_input"
+    )
+    context_text = bleach.clean(context_text.strip()) if context_text else ""
+    st.session_state.context_text = context_text
+
     return document_text, context_text
 
-def create_translation_and_chat_interface():
-    """Create the translation interface for interaction with Ustaad Jeeed Jee."""
+
+def create_translation_and_chat_interface(document_text, context_text):
     if not st.session_state.get('user_info'):
-        st.warning("Please sign in to use Ustaad Jeeed!")
+        st.warning("Please sign in to use Ustaad Jee!")
         return
-    st.markdown("<h3>Interact with Ustaad Jee</h3>", unsafe_url_html=True)
+    st.markdown("<h3>Interact with Ustaad Jee</h3>", unsafe_allow_html=True)
     if not document_text:
         st.warning("Please provide a document for Ustaad Jee to work with!")
         return
@@ -1322,315 +1291,331 @@ def create_translation_and_chat_interface():
     with col1:
         translate_language = st.selectbox(
             label="Translation Language",
-            options=["Urdu"], "English", "Roman Urdu"],
-        key="translate_language_key",
-        help="Select the language for translation.",
-        "Select Language for Translation"
-    )
+            options=["Urdu", "English", "Roman Urdu"],
+            key="translate_language",
+            help="Select the language for translation."
+        )
     with col2:
-        chat_language = col2.selectbox(
-    label="Chat Language",
-    options=["English"], "Urdu", "Roman Urdu"],
-    key="chat_language_key",
-    help="Select the language for responses.",
-    "Select Language for Responses"
-    )
+        chat_language = st.selectbox(
+            label="Chat Language",
+            options=["English", "Urdu", "Roman Urdu"],
+            key="chat_language",
+            help="Select the language for responses."
+        )
     with col3:
         st.empty()
-    st.empty()
-    st.empty()
-    st.write("")
-    st.empty()       ""
-    st.markdown("")
-    st.markdown("")
-    if st.button.button("Start Translation", type="primary",
-                        help="Translate to the selected language",
-                        key="start_translation"):
-        "):
-    if document_text and st.session_state.llm:
-        start_time = time.time()
-    with st.spinner("Translating..."):
-        try:
-            if translate_language == "Urdu":
-                translation = st.session_state.llm.translate_to_urdu(
-                    text=document_text,
-                    glossary=["st.session_state.glossary"] if st.session_state.glossary else [],
-                    context="context_text",
-                    temperature=0
-                ),
-                chat_entry = {
-                    "query": "Translation Request",
-                    "response": translation,
-                    "language": "Urdu",
-                    "type": "translation",
-                    "timestamp": time.time(),
-                },
-            elif translate_language == "Roman Urdu":
-                translation = st.session_state.llm.translate_to_roman_urdu(
-                    text="text_document",
-                    glossary=["st.session_state.glossaries"] if st.session_state.glossary else None,
-                    context=context_text,
-                    temperature=0,
-                ),
-                chat_entry = {
-                    "query": "Translation Request",
-                    "response": translation,
-                    "language": "Roman Urdu",
-                    "type": "roman",
-                    "timestamp": time.time(),
-                },
-            else:
-                chat_entry = {
-                    "query": "Translation Request",
-                    "response": document_text,
-                    "language": "English",
-                    "type": "translation",
-                    "timestamp": time.time(),
-                },
-            }
-            st.session_state.chat_history.append(chat_entry)
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            try:
-                loop.run_until_complete(store_chat_history_async(st.session_state.user_info['localId'], chat_entry))
-                loop.run(),
-            loop.run_until_complete(log_user_activity_async(st.session_state.user_info['localId'], "translation",
-                                                            {"language": translate_language, "document_length": len(document_text)}))
-        finally:
-            loop.close()
-    st.success(f"{translate_language} translation completed successfully!")
-    print(f"Translation took {time.time() - start_time:.2f} seconds")
-    st.rerun()
-except Exception as e),
-st.error(f"Error: {str(e)}")
-st.markdown("---")
-st.markdown("**Ustaad Jee's Chat**")
-if st.session_state.chat_history:
-    with st.container(height=550, width=True, border=True):
-page_size = 10
-total_pages = (len(st.session_state.chat_history) + page_size - 1) // page_size
-page = st.number_input("Page", min_value=1, max_value=max(1, total_pages), value=1, step=1, key="chat_page")
-start_idx = (page - 1) * page_size
-end_idx = min(start_idx + page_size, len(st.session_state.chat_history))
-for i in range(start_idx, end_idx):
-    chat = st.session_state.chat_history[i]
-chat_time = time.strftime("%H:%M", time.localtime(chat.get('timestamp', time.time())))
-st.markdown(
-"""
-f"""
-<div class="meta chat-header" style="justify-content: space-between; flex-end;">
-<span class="avatar user-avatar">🤗</span>
-Student at {chat_time}
-</div>
-<div class="user-bubble">{chat['query']}</div>
-f"""
-                    ),
+        st.empty()
+        st.empty()
+        st.write("")
+        st.write("\n")
+        if st.button("Start Translation", type="primary",
+                     help="Translate the entire document"):
+            if document_text and st.session_state.llm:
+                with st.spinner("Translating..."):
+                    try:
+                        if translate_language == "Urdu":
+                            translation = st.session_state.llm.translate_to_urdu(
+                                text=document_text,
+                                glossary=st.session_state.glossary if st.session_state.glossary else None,
+                                context=context_text,
+                                temperature=0.3
+                            )
+                            chat_entry = {
+                                "query": "Translation Request",
+                                "response": translation,
+                                "language": "Urdu",
+                                "type": "translation",
+                                "timestamp": time.time()
+                            }
+                        elif translate_language == "Roman Urdu":
+                            translation = st.session_state.llm.translate_to_roman_urdu(
+                                text=document_text,
+                                glossary=st.session_state.glossary if st.session_state.glossary else None,
+                                context=context_text,
+                                temperature=0.3
+                            )
+                            chat_entry = {
+                                "query": "Translation Request",
+                                "response": translation,
+                                "language": "Roman Urdu",
+                                "type": "roman",
+                                "timestamp": time.time()
+                            }
+                        else:
+                            chat_entry = {
+                                "query": "Translation Request",
+                                "response": document_text,
+                                "language": "English",
+                                "type": "translation",
+                                "timestamp": time.time()
+                            }
+                        st.session_state.chat_history.append(chat_entry)
+                        store_chat_history(st.session_state.user_info['localId'], chat_entry)
+                        log_user_activity(st.session_state.user_info['localId'], "translation",
+                                          {"language": translate_language, "document_length": len(document_text)})
+                        st.success(f"{translate_language} translation completed successfully!")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Error: {str(e)}")
+    st.markdown("---")
+    st.markdown("**Ustaad Jee's Chat**")
+    if st.session_state.chat_history:
+        with st.container(height=550, border=True):
+            for i, chat in enumerate(st.session_state.chat_history):
+                chat_time = time.strftime("%H:%M", time.localtime(chat.get('timestamp', time.time())))
+                st.markdown(
+                    f"""
+                    <div class="chat-header" style="justify-content: flex-end;">
+                        <div class="avatar user-avatar">🤗</div>
+                        Student at {chat_time}
+                    </div>
+                    <div class="user-bubble">{chat['query']}</div>
+                    """,
                     unsafe_allow_html=True
                 )
-                bot_name = "Ustaad Jee" if chat["language"] in ["Urdu", "Roman Urdu"] else "Ustaad Jee (English)",
-                    st.markdown(
-                        f"""
-"""
-<div class="meta chat-header">
-<span class="avatar bot">🪐</span>
-{bot_name} at {chat_time}
-</div>
-<div class="bot-bubble">{chat['response']}</div>
-f"""
-),
-unsafe_allow_html=True,
-)
-feedback_key = f"feedback_{i}_{chat.get('time_stamp', time.time())})"
-if feedback_key is not in st.session_state:
-    with st.expander("Rate this response", expanded=False):
-rating = st.slider("Stars", min_value=1, max_value=3, value=1, key=f"slider_{feedback_key}")
-if st.button("Submit Rating", key=f"submit_rating_{feedback_key}", type="primary"):
-    start_time = time.time()
-loop = asyncio.new_event_loop()
-asyncio.set_event_loop("loop")
-try:
-    loop.run_until_complete(st.session_state.feedback_db.store_feedback(
-        st.session_state.user_info['local_id'],
-        str(chat['query']),
-        str(chat['response']),
-        str(chat["language"]),
-        str(rating)
-    ))
-    st.session_state[feedback_key] = True
-    st.session_state[f"final_rating_{feedback_key}"] = rating
-    st.success("Thanks for rating!")
-    print(f(f"Feedback submission took {time.time() - start_time:.2f} seconds"))}")
-    st.rerun()
-finally:
-    loop.close()
-else:
-final_rating = st.session_state.get(f"final_rating_{feedback_key}", 1)
-stars_display = "⭐" * final_rating
-with st.expander(f"Rated: {stars_display}", expanded=False):
-    st.markdown("*Thank you for the feedback!*")
-if i < end_idx - 1:
-    st.markdown("<hr>", unsafe_allow_html=True)
-if len(st.session_state.chat_history) > 50:
-    st.session_state.chat_history = st.session_state.chat_history[-50:]
-else:
-st.info("Ustaad Jee's Chat is empty. Please ask a question to start!")
+                bot_name = "Ustaad Jee" if chat["language"] in ["Urdu", "Roman Urdu"] else "Ustaad Jee (English)"
+                st.markdown(
+                    f"""
+                    <div class="chat-header">
+                        <div class="avatar bot">🪄</div>
+                        {bot_name} at {chat_time}
+                    </div>
+                    <div class="bot-bubble">{chat['response']}</div>
+                    """,
+                    unsafe_allow_html=True
+                )
 
-st.markdown("**Ask Ustaad Jee**")
-with st.form(key="chat_form", clear_on_submit=True):
-    col1, col2, col3 = st.columns([5, 2, 1])
-    with col1:
-        chat_query = st.text_input(
-            label="Type your question...",
-            placeholder="Ask about your document or request an explanation...",
-            label_visibility="collapsed",
-            key="chat_input"
-        )
-    with col2:
-        quick_action = st.selectbox(
-            label="Quick Actions",
-            options=["Quick Action", "Summarize", "Key Points", "Simplify", "Technical Terms"],
-            key="quick_action_dropdown",
-            label_visibility="collapsed"
-        )
-    with col3:
-        send_btn = st.form_submit_button("Send", type="primary", use_container_width=True)
-    if send_btn:
-        start_time = time.time()
-        if quick_action != "Quick Action":
-            if document_text and st.session_state.llm:
-                quick_queries = {
-                    "Summarize": "Provide a brief summary of the document.",
-                    "Key Points": "List the key points and main concepts of the document.",
-                    "Simplify": "Explain the document in a very simple way.",
-                    "Technical Terms": "List the key technical terms and their meanings."
-                }
-                with st.spinner(f"{quick_action}..."):
-                    try:
-                        response = st.session_state.llm.document_chat(
-                            document_text=document_text,
-                            question=quick_queries[quick_action],
-                            language=chat_language,
-                            glossary=st.session_state.glossary if st.session_state.glossary else None
-                        )
-                        chat_entry = {
-                            "query": quick_action,
-                            "response": response,
-                            "language": chat_language,
-                            "type": "quick_action",
-                            "timestamp": time.time()
-                        }
-                        st.session_state.chat_history.append(chat_entry)
-                        loop = asyncio.new_event_loop()
-                        asyncio.set_event_loop(loop)
-                        try:
-                            loop.run_until_complete(store_chat_history_async(st.session_state.user_info['localId'], chat_entry))
-                            loop.run_until_complete(log_user_activity_async(st.session_state.user_info['localId'], "quick_action",
-                                                                            {"action": quick_action.lower().replace(" ", "_")}))
-                        finally:
-                            loop.close()
-                        print(f"Quick action took {time.time() - start_time:.2f} seconds")
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"Error: {str(e)}")
-            elif not document_text:
-                st.warning("Please provide a document to use quick actions!")
-            elif not st.session_state.llm:
-                st.error("Please configure Ustaad Jee's brain first!")
-        elif chat_query:
-            chat_query = bleach.clean(chat_query.strip())
-            if st.session_state.llm:
-                with st.spinner("Ustaad Jee is thinking..."):
-                    try:
-                        response = st.session_state.llm.document_chat(
-                            document_text=document_text,
-                            question=chat_query,
-                            language=chat_language,
-                            glossary=st.session_state.glossary if st.session_state.glossary else None
-                        )
-                        chat_entry = {
-                            "query": chat_query,
-                            "response": response,
-                            "language": chat_language,
-                            "type": "question",
-                            "timestamp": time.time()
-                        }
-                        st.session_state.chat_history.append(chat_entry)
-                        loop = asyncio.new_event_loop()
-                        asyncio.set_event_loop(loop)
-                        try:
-                            loop.run_until_complete(store_chat_history_async(st.session_state.user_info['localId'], chat_entry))
-                            loop.run_until_complete(log_user_activity_async(st.session_state.user_info['localId'], "chat",
-                                                                            {"query": chat_query, "language": chat_language}))
-                        finally:
-                            loop.close()
-                        print(f"Chat query took {time.time() - start_time:.2f} seconds")
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"Error: {str(e)}")
-            else:
-                st.error("Please configure Ustaad Jee's brain first!")
-        else:
-            st.warning("Please enter a question or select a quick action!")
+                # Cute Rating System with minimal styling
+                feedback_key = f"feedback_{i}_{chat.get('timestamp', time.time())}"
 
-with st.expander("Chat Controls", expanded=False):
-    col1, col2, col3 = st.columns([1, 1, 4])
-    with col1:
-        if st.session_state.chat_history and st.button("Clear Chat", type="secondary", key="clear_chat_btn"):
-            st.session_state.chat_history = []
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            try:
-                loop.run_until_complete(log_user_activity_async(st.session_state.user_info['localId'], "clear_chat", {}))
-            finally:
-                loop.close()
-            st.success("Chat cleared!")
-            st.rerun()
-    with col2:
-        if st.button("Reset All", type="secondary", key="reset_all_btn"):
-            st.session_state.chat_history = []
-            st.session_state.uploaded_document = ""
-            st.session_state.context_text = ""
-            st.session_state.results = {}
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            try:
-                loop.run_until_complete(log_user_activity_async(st.session_state.user_info['localId'], "reset_all", {}))
-            finally:
-                loop.close()
-            st.success("Ready for a new session!")
-            st.rerun()
-    with col3:
-        if st.session_state.chat_history:
-            chat_export = ""
-            for chat in st.session_state.chat_history:
-                chat_time = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(chat.get("timestamp")))
-                chat_export += f"[{chat_time}] Student: {chat['query']}\n"
-                chat_export += f"[{chat_time}] Ustaad Jee ({chat['language']}): {chat['response']}\n\n"
-            st.download_button(
-                label="Download Chat",
-                data=chat_export,
-                file_name=f"ustaad_jee_chat_{int(time.time())}.txt",
-                mime="text/plain",
-                use_container_width=True,
-                key="download_chat_btn"
+                # Check if feedback has not been submitted
+                if feedback_key not in st.session_state or not st.session_state.get(feedback_key, False):
+                    # Custom CSS for cute, compact rating
+                    st.markdown("""
+                        <style>
+                        .cute-rating .streamlit-expanderHeader {
+                            font-size: 13px !important;
+                            padding: 0.2rem 0.5rem !important;
+                            background: transparent !important;
+                            border: none !important;
+                            border-radius: 15px !important;
+                        }
+                        .cute-rating .streamlit-expanderContent {
+                            padding: 0.3rem !important;
+                            border: none !important;
+                            background: transparent !important;
+                        }
+                        .cute-rating {
+                            border: none !important;
+                            background: transparent !important;
+                        }
+                        </style>
+                    """, unsafe_allow_html=True)
+
+                    with st.expander("Rate this response ", expanded=False):
+                        # Store rating in session state
+                        rating_session_key = f"temp_rating_{feedback_key}"
+                        if rating_session_key not in st.session_state:
+                            st.session_state[rating_session_key] = 0
+
+                        # Inline star rating without extra text
+                        star_text = ""
+                        for star_num in range(1, 6):
+                            star_icon = "⭐" if star_num <= st.session_state[rating_session_key] else "⭐️"
+                            star_text += f'<span style="cursor: pointer; font-size: 18px; margin: 0 2px;" onclick="rate({star_num})">{star_icon}</span>'
+
+                        # Create inline star buttons
+                        cols = st.columns(7)  # 5 stars + submit + clear
+                        for star_num in range(1, 6):
+                            with cols[star_num - 1]:
+                                star_icon = "⭐" if star_num <= st.session_state[rating_session_key] else "☆"
+                                if st.button(
+                                        f"{star_icon}",
+                                        key=f"star_btn_{feedback_key}_{star_num}",
+                                        help=f"{star_num} star{'s' if star_num > 1 else ''}",
+                                        use_container_width=True
+                                ):
+                                    st.session_state[rating_session_key] = star_num
+                                    st.rerun()
+
+                        # Submit button
+                        if st.session_state[rating_session_key] > 0:
+                            with cols[5]:
+                                if st.button("✨", key=f"submit_{feedback_key}", type="primary", help="Submit rating"):
+                                    try:
+                                        rating_value = str(st.session_state[rating_session_key])
+                                        st.session_state.feedback_db.store_feedback(
+                                            question=str(chat['query']),
+                                            response=str(chat['response']),
+                                            language=str(chat['language']),
+                                            rating=rating_value
+                                        )
+                                        st.session_state[feedback_key] = True
+                                        st.session_state[f"final_rating_{feedback_key}"] = st.session_state[
+                                            rating_session_key]
+                                        del st.session_state[rating_session_key]
+                                        st.success("Thanks! ")
+                                        st.rerun()
+                                    except Exception as e:
+                                        st.error(f"Error submitting rating: {str(e)}")
+
+                            # Clear button
+                            with cols[6]:
+                                if st.button("🧹", key=f"clear_{feedback_key}", help="Clear rating"):
+                                    st.session_state[rating_session_key] = 0
+                                    st.rerun()
+
+                else:
+                    # Show completed rating in a cute way
+                    final_rating = st.session_state.get(f"final_rating_{feedback_key}", "N/A")
+                    if final_rating != "N/A":
+                        stars_display = "⭐" * final_rating
+
+
+                        with st.expander(f"{stars_display}", expanded=False):
+                            st.markdown("*Thank you for the feedback!*")
+                    else:
+                        with st.expander(" Rated", expanded=False):
+                            st.markdown("*Thank you for the feedback!*")
+
+                if i < len(st.session_state.chat_history) - 1:
+                    st.markdown("<hr>", unsafe_allow_html=True)
+    else:
+        st.info("Ustaad Jee's Chat is empty. Ask a question to start!")
+
+    st.markdown("**Ask Ustaad Jee**")
+    with st.form(key="chat_form", clear_on_submit=True):
+        col1, col2, col3 = st.columns([5, 2, 1])  # Adjusted column ratios for layout
+        with col1:
+            chat_query = st.text_input(
+                "Type your question...",
+                placeholder="Ask about your document or request an explanation...",
+                label_visibility="collapsed",
+                key="chat_input"
             )
+        with col2:
+            quick_action = st.selectbox(
+                "Quick Actions",
+                ["Quick Action", "Summarize", "Key Points", "Simplify", "Technical Terms"],
+                key="quick_action_dropdown",
+                label_visibility="collapsed"
+            )
+        with col3:
+            send_btn = st.form_submit_button("Send", type="primary", use_container_width=True)
+        if send_btn:
+            if quick_action != "Quick Action":
+                if document_text and st.session_state.llm:
+                    quick_queries = {
+                        "Summarize": "Provide a brief summary of the document.",
+                        "Key Points": "List the key points and main concepts of the document.",
+                        "Simplify": "Explain the document in a very simple way.",
+                        "Technical Terms": "List the key technical terms and their meanings."
+                    }
+                    with st.spinner(f"{quick_action}..."):
+                        try:
+                            response = st.session_state.llm.document_chat(
+                                document_text=document_text,
+                                question=quick_queries[quick_action],
+                                language=chat_language,
+                                glossary=st.session_state.glossary if st.session_state.glossary else None
+                            )
+                            chat_entry = {
+                                "query": quick_action,
+                                "response": response,
+                                "language": chat_language,
+                                "type": "quick_action",
+                                "timestamp": time.time()
+                            }
+                            st.session_state.chat_history.append(chat_entry)
+                            store_chat_history(st.session_state.user_info['localId'], chat_entry)
+                            log_user_activity(st.session_state.user_info['localId'], "quick_action",
+                                              {"action": quick_action.lower().replace(" ", "_")})
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Error: {str(e)}")
+                elif not document_text:
+                    st.warning("Please provide a document to use quick actions!")
+                elif not st.session_state.llm:
+                    st.error("Please configure Ustaad Jee's brain first!")
+            elif chat_query:
+                chat_query = bleach.clean(chat_query.strip())
+                if st.session_state.llm:
+                    with st.spinner("Ustaad Jee is thinking..."):
+                        try:
+                            response = st.session_state.llm.document_chat(
+                                document_text=document_text,
+                                question=chat_query,
+                                language=chat_language,
+                                glossary=st.session_state.glossary if st.session_state.glossary else None
+                            )
+                            chat_entry = {
+                                "query": chat_query,
+                                "response": response,
+                                "language": chat_language,
+                                "type": "question",
+                                "timestamp": time.time()
+                            }
+                            st.session_state.chat_history.append(chat_entry)
+                            store_chat_history(st.session_state.user_info['localId'], chat_entry)
+                            log_user_activity(st.session_state.user_info['localId'], "chat",
+                                              {"query": chat_query, "language": chat_language})
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Error: {str(e)}")
+                else:
+                    st.error("Please configure Ustaad Jee's brain first!")
+            else:
+                st.warning("Please enter a question or select a quick action!")
+
+    with st.expander("Chat Controls", expanded=False):
+        col1, col2, col3 = st.columns([1, 1, 4])
+        with col1:
+            if st.session_state.chat_history and st.button("Clear Chat", type="secondary"):
+                st.session_state.chat_history = []
+                log_user_activity(st.session_state.user_info['localId'], "clear_chat", {})
+                st.success("Chat cleared!")
+                st.rerun()
+        with col2:
+            if st.button("Reset All", type="secondary"):
+                st.session_state.chat_history = []
+                st.session_state.uploaded_document = ""
+                st.session_state.context_text = ""
+                st.session_state.results = {}
+                log_user_activity(st.session_state.user_info['localId'], "reset_all", {})
+                st.success("Ready for a new session!")
+                st.rerun()
+        with col3:
+            if st.session_state.chat_history:
+                chat_export = ""
+                for chat in st.session_state.chat_history:
+                    chat_time = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(chat.get("timestamp")))
+                    chat_export += f"[{chat_time}] Student: {chat['query']}\n"
+                    chat_export += f"[{chat_time}] Ustaad Jee ({chat['language']}): {chat['response']}\n\n"
+                st.download_button(
+                    label="Download Chat",
+                    data=chat_export,
+                    file_name=f"ustaad_jee_chat_{int(time.time())}.txt",
+                    mime="text/plain",
+                    use_container_width=True
+                )
 
 def create_usage_tips():
-    with st.sidebar.expander("How to Use Ustaad Jee"):
+    with st.expander("How to Use Ustaad Jee"):
         st.markdown("""
         ### Learn with Ustaad Jee:
         - **Document**: Break long documents into smaller chunks (1000-2000 words).
         - **Glossary**: Add technical terms (e.g., computer terms). Save or load terms via CSV!
-        - **Brain Selection**: Use GPT-4o or Claude for complex documents, DeepSeek for code, or Local Models for offline use.
+        - **Brain Selection**: Use GPT-4 or Claude for complex documents, DeepSeek for code, or Local Models for offline use.
         - **Chat**:
           - Use quick action buttons for summaries, key points, etc.
-          - Scroll through pages of Ustaad Jee's chat history.
-          - Rate each chat with 1–3 stars.
-          - Save your chat history as a text file.
+          - Scroll through Ustaad Jee's chat history.
+          - Rate each response with 1–5 stars.
+          - Save your chat as a text file.
           - Clear chat or reset everything.
         - **Languages**: Ustaad Jee can teach in English, Urdu, or Roman Urdu!
         - **Translation**: Click 'Start Translation' to translate the entire document.
         """)
+
 
 def create_sample_data():
     with st.expander("Sample Data"):
@@ -1644,19 +1629,14 @@ def create_sample_data():
         if st.button("Use Sample Document", key="use_sample_doc_btn"):
             st.session_state.uploaded_document = sample_doc
             st.success("Sample document loaded!")
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            try:
-                loop.run_until_complete(log_user_activity_async(st.session_state.user_info['localId'], "load_sample_data", {}))
-            finally:
-                loop.close()
+            log_user_activity(st.session_state.user_info['localId'], "load_sample_document", {})
             st.rerun()
         st.markdown("### Sample Glossary:")
         st.write("Add these terms to Ustaad Jee's glossary:")
         sample_terms = {
             "Authentication": "تصديق",
-            "JWT": "JSON Web Token",
-            "API_KEY": "ایپلیکیشن پروگرامنگ انٹرفیس",
+            "JWT": "JSON ویب ٹوکن",
+            "API": "ایپلیکیشن پروگرامنگ انٹرفیس",
             "Database": "ڈیٹابیس",
             "Encryption": "خفیہ کاری"
         }
@@ -1664,21 +1644,19 @@ def create_sample_data():
             if st.button(f"+ Add: {eng} → {urdu}", key=f"sample_{eng}"):
                 st.session_state.glossary[eng] = urdu
                 st.success(f"Added: {eng}")
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                try:
-                    loop.run_until_complete(log_user_activity_async(st.session_state.user_info['localId'], "add_sample_glossary_term",
-                                                                    {"english_term": eng, "urdu_term": urdu}))
-                finally:
-                    loop.close()
+                log_user_activity(st.session_state.user_info['localId'], "add_sample_glossary_term",
+                                  {"english_term": eng, "urdu_term": urdu})
                 st.rerun()
+
 
 def create_footer():
     st.markdown("---")
     st.markdown(
-        "<div style='text-align: center; color: #333333; font-family: Roboto, sans-serif; font-size: 14px;'>Ustaad Jee's Knowledge Hub - Rerun Testing!</>",
+        "<div style='text-align: center; color: #333333; font-family: Roboto, sans-serif; font-size: 14px;'>Ustaad Jee's Knowledge Hub - RSM IS TESTING!</div>",
         unsafe_allow_html=True
     )
+
+
 def main():
     st.set_page_config(
         page_title="Ustaad Jee's Knowledge Hub",

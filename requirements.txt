@@ -6,7 +6,3 @@ python-jose[cryptography]
 python-dotenv
 pandas
 bleach
-poppler-utils
-PyPDF2
-pdf2image
-easyocr
