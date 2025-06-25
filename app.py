@@ -1095,6 +1095,8 @@ def create_glossary_section():
             else:
                 st.warning("Both terms are required!")
 
+
+
     if st.session_state.glossary:
         glossary_df = pd.DataFrame([
             {"English Term": eng, "Urdu Term": urdu}
