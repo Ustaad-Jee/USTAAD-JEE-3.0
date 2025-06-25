@@ -1082,7 +1082,7 @@ def create_glossary_section():
             submit = st.form_submit_button("+ Add")
         if submit:
             if english_term and urdu_term:
-                st.session_state.glossary[english_term] = urdu_term
+                st.session_state.glossary[english_term]=urdu_term
                 st.success(f"Added: {english_term} → {urdu_term}")
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
