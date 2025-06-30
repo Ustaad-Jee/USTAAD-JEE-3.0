@@ -28,18 +28,6 @@ from firestore_utils import log_user_activity, store_chat_history, set_admin_use
 
 from firebase_admin import auth, firestore
 
-
-
-
-# Load environment variables
-load_dotenv()
-
-# Initialize Firebase Admin SDK
-# Load environment variables (optional for local fallback)
-load_dotenv()
-
-# Load environment variables (optional for local fallback)
-load_dotenv()
 # Initialize Firebase Admin SDK
 if not firebase_admin._apps:
     try:
