@@ -4,9 +4,9 @@ import bleach
 import time
 from apconfig import AppConfig
 from typing import List, Optional
-from pinecone import Pinecone, ServerlessSpec
-from pinecone.exceptions import PineconeApiException
-from langchain_pinecone import PineconeVectorStore
+from qdrant_client import QdrantClient
+from qdrant_client.models import Distance, VectorParams
+from langchain_qdrant import QdrantVectorStore
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_huggingface import HuggingFaceEmbeddings
 from llama_index.core.node_parser import SentenceWindowNodeParser, HierarchicalNodeParser, get_leaf_nodes
@@ -14,53 +14,43 @@ from llama_index.core.postprocessor import MetadataReplacementPostProcessor, Sen
 from llama_index.core import Document, VectorStoreIndex, StorageContext, Settings
 from llama_index.core.retrievers import AutoMergingRetriever
 from llama_index.core.query_engine import RetrieverQueryEngine
+from llama_index_vector_stores_qdrant import QdrantVectorStore as LlamaQdrantVectorStore
 from llm_utils import CustomLLM
 import traceback
 
-INDEX_NAME = "ustaad-jee-textbooks"
-NAMESPACE = "ustaad-jee"
+COLLECTION_NAME = "ustaad-jee-textbooks"
 
-def initialize_pinecone() -> bool:
-    """Initialize Pinecone client using modern SDK"""
+def initialize_qdrant() -> bool:
+    """Initialize Qdrant client"""
     try:
-        api_key = st.secrets.get("PINECONE_API_KEY")
-        print(f"Pinecone API Key: {api_key[:5]}..." if api_key else "No API key found")  # Debug
-        if not api_key:
-            st.error("Pinecone API key not found in secrets")
+        api_key = st.secrets.get("QDRANT_API_KEY")
+        url = st.secrets.get("QDRANT_URL")
+        print(f"Qdrant API Key: {api_key[:5]}..." if api_key else "No API key found")  # Debug
+        print(f"Qdrant URL: {url}")  # Debug
+        if not api_key or not url:
+            st.error("Qdrant API key or URL not found in secrets")
             return False
 
-        pc = Pinecone(api_key=api_key)
-        print(f"Pinecone indexes: {pc.list_indexes().names()}")  # Debug
+        client = QdrantClient(url=url, api_key=api_key)
+        st.session_state["qdrant_client"] = client
 
-        # Store client in session state
-        st.session_state["pinecone_client"] = pc
+        # Check if collection exists
+        collections = client.get_collections()
+        collection_names = [c.name for c in collections.collections]
+        print(f"Qdrant collections: {collection_names}")  # Debug
 
-        # Check if index exists and is accessible
-        existing_indexes = pc.list_indexes().names()
-        if INDEX_NAME not in existing_indexes:
-            print(f"Creating Pinecone index: {INDEX_NAME}")  # Debug
-            pc.create_index(
-                name=INDEX_NAME,
-                dimension=384,
-                metric="cosine",
-                spec=ServerlessSpec(cloud="aws", region="us-east-1")
+        if COLLECTION_NAME not in collection_names:
+            print(f"Creating Qdrant collection: {COLLECTION_NAME}")  # Debug
+            client.create_collection(
+                collection_name=COLLECTION_NAME,
+                vectors_config=VectorParams(size=384, distance=Distance.COSINE)
             )
-            time.sleep(30)
 
-        # Test index connection
-        index = pc.Index(INDEX_NAME)
-        stats = index.describe_index_stats()
-        print(f"Index stats: {stats}")  # Debug
-
-        print("Pinecone initialized successfully")  # Debug
+        print("Qdrant initialized successfully")  # Debug
         return True
-    except PineconeApiException as e:
-        st.error(f"Pinecone initialization failed: {str(e)}")
-        print(f"Pinecone error details: {str(e)}")  # Debug
-        return False
     except Exception as e:
-        st.error(f"Unexpected error during Pinecone initialization: {str(e)}")
-        print(f"Unexpected Pinecone error: {str(e)}")  # Debug
+        st.error(f"Qdrant initialization failed: {str(e)}")
+        print(f"Qdrant error details: {str(e)}")  # Debug
         return False
 
 def initialize_embeddings() -> bool:
@@ -69,7 +59,7 @@ def initialize_embeddings() -> bool:
         print("Initializing embeddings")  # Debug
         embeddings = HuggingFaceEmbeddings(
             model_name="sentence-transformers/all-MiniLM-L6-v2",
-            model_kwargs={'device': 'cpu'},  # Ensure CPU usage
+            model_kwargs={'device': 'cpu'},
             encode_kwargs={'normalize_embeddings': True}
         )
         st.session_state["embeddings"] = embeddings
@@ -102,10 +92,10 @@ def initialize_components():
     try:
         print("Starting initialize_components")  # Debug
 
-        # Initialize Pinecone
-        if not initialize_pinecone():
-            st.error("Pinecone initialization failed, stopping execution.")
-            print("Failed: Pinecone initialization")  # Debug
+        # Initialize Qdrant
+        if not initialize_qdrant():
+            st.error("Qdrant initialization failed, stopping execution.")
+            print("Failed: Qdrant initialization")  # Debug
             return False
 
         # Initialize Embeddings
@@ -136,28 +126,27 @@ def initialize_components():
 def check_existing_vectorstore() -> bool:
     """Check if vectorstore already exists and is accessible"""
     try:
-        if "pinecone_client" not in st.session_state:
+        if "qdrant_client" not in st.session_state:
             return False
 
-        pc = st.session_state["pinecone_client"]
-        if INDEX_NAME not in pc.list_indexes().names():
+        client = st.session_state["qdrant_client"]
+        collections = client.get_collections()
+        collection_names = [c.name for c in collections.collections]
+        if COLLECTION_NAME not in collection_names:
             return False
 
-        index = pc.Index(INDEX_NAME)
-        stats = index.describe_index_stats()
-
-        # If index has documents, create vectorstore connection
-        if stats.total_vector_count > 0:
-            # Create LangChain vectorstore for basic operations
-            vectorstore = PineconeVectorStore(
-                index=index,
-                namespace=NAMESPACE,
+        # Check if collection has vectors
+        collection_info = client.get_collection(COLLECTION_NAME)
+        if collection_info.points_count > 0:
+            # Create LangChain vectorstore
+            vectorstore = QdrantVectorStore(
+                client=client,
+                collection_name=COLLECTION_NAME,
                 embedding=st.session_state["embeddings"]
             )
-
             st.session_state["vectorstore"] = vectorstore
             st.session_state["documents_indexed"] = True
-            print(f"Existing vectorstore found with {stats.total_vector_count} vectors")
+            print(f"Existing vectorstore found with {collection_info.points_count} vectors")
             return True
 
         return False
@@ -177,9 +166,8 @@ def parse_document(document: any) -> List[str]:
         elif hasattr(document, 'read'):
             if document.name.endswith(".pdf"):
                 try:
-                    # Try pymupdf4llm first - read bytes properly
                     content = document.read()
-                    document.seek(0)  # Reset file pointer
+                    document.seek(0)
                     text = pymupdf4llm.to_markdown(content)
                     cleaned_text = bleach.clean(text, tags=["p", "b", "i", "strong", "em"], strip=True)
                     text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
@@ -188,9 +176,8 @@ def parse_document(document: any) -> List[str]:
                     return chunks
                 except Exception as e:
                     print(f"pymupdf4llm failed: {str(e)}, falling back to pymupdf")  # Debug
-                    # Fallback to pymupdf
                     import pymupdf
-                    document.seek(0)  # Reset file pointer
+                    document.seek(0)
                     doc = pymupdf.open(stream=document.read(), filetype="pdf")
                     text = ""
                     for page in doc:
@@ -217,51 +204,56 @@ def parse_document(document: any) -> List[str]:
         print(f"Parse document error: {str(e)}")  # Debug
         raise Exception(f"Error parsing document: {str(e)}")
 
-def create_pinecone_vectorstore(text_chunks: List[str]) -> PineconeVectorStore:
-    """Create or update Pinecone vectorstore with text chunks"""
+def create_qdrant_vectorstore(text_chunks: List[str]) -> tuple:
+    """Create or update Qdrant vectorstore with text chunks"""
     try:
-        print("Starting create_pinecone_vectorstore")  # Debug
-        if "pinecone_client" not in st.session_state:
-            raise ValueError("Pinecone client not initialized")
+        print("Starting create_qdrant_vectorstore")  # Debug
+        if "qdrant_client" not in st.session_state:
+            raise ValueError("Qdrant client not initialized")
 
-        pc = st.session_state["pinecone_client"]
-        existing_indexes = pc.list_indexes().names()
-        print(f"Existing Pinecone indexes: {existing_indexes}")  # Debug
+        client = st.session_state["qdrant_client"]
+        collections = client.get_collections()
+        collection_names = [c.name for c in collections.collections]
+        print(f"Existing Qdrant collections: {collection_names}")  # Debug
 
-        if INDEX_NAME not in existing_indexes:
-            st.info(f"Creating new Pinecone index '{INDEX_NAME}' with dimension 384...")
-            print(f"Creating Pinecone index: {INDEX_NAME}")  # Debug
-            pc.create_index(
-                name=INDEX_NAME,
-                dimension=384,
-                metric="cosine",
-                spec=ServerlessSpec(cloud="aws", region="us-east-1")
+        if COLLECTION_NAME not in collection_names:
+            st.info(f"Creating new Qdrant collection '{COLLECTION_NAME}' with dimension 384...")
+            print(f"Creating Qdrant collection: {COLLECTION_NAME}")  # Debug
+            client.create_collection(
+                collection_name=COLLECTION_NAME,
+                vectors_config=VectorParams(size=384, distance=Distance.COSINE)
             )
-            time.sleep(30)
-            st.success(f"Index '{INDEX_NAME}' created successfully!")
+            time.sleep(5)
+            st.success(f"Collection '{COLLECTION_NAME}' created successfully!")
 
         print(f"Text chunks to add: {len(text_chunks)}")  # Debug
         if text_chunks:
             print(f"Sample chunk: {text_chunks[0][:100]}...")  # Debug
 
-        # Create LangChain vectorstore connection
-        vectorstore = PineconeVectorStore(
-            index=pc.Index(INDEX_NAME),
-            namespace=NAMESPACE,
+        # Create LangChain vectorstore
+        langchain_vectorstore = QdrantVectorStore(
+            client=client,
+            collection_name=COLLECTION_NAME,
             embedding=st.session_state["embeddings"]
         )
 
-        # Add text chunks if provided using LangChain vectorstore
+        # Create LlamaIndex vectorstore
+        llamaindex_vectorstore = LlamaQdrantVectorStore(
+            client=client,
+            collection_name=COLLECTION_NAME
+        )
+
+        # Add text chunks if provided
         if text_chunks:
             print("Adding text chunks to vectorstore")  # Debug
-            vectorstore.add_texts(texts=text_chunks)
+            langchain_vectorstore.add_texts(texts=text_chunks)
             print("Upsert complete, vectorstore updated")  # Debug
 
-        return vectorstore
+        return langchain_vectorstore, llamaindex_vectorstore
     except Exception as e:
-        st.error(f"Error creating Pinecone vector store: {str(e)}")
+        st.error(f"Error creating Qdrant vector store: {str(e)}")
         print(f"Vectorstore creation error: {str(e)}\n{traceback.format_exc()}")  # Debug
-        raise Exception(f"Error creating Pinecone vector store: {str(e)}")
+        raise Exception(f"Error creating Qdrant vector store: {str(e)}")
 
 def build_sentence_window_index(document_text: str) -> VectorStoreIndex:
     """Build sentence window index for advanced RAG"""
@@ -289,9 +281,7 @@ def build_sentence_window_index(document_text: str) -> VectorStoreIndex:
         if not nodes:
             raise Exception("No nodes created for sentence window index")
 
-        # Use in-memory storage for advanced operations
         storage_context = StorageContext.from_defaults()
-
         index = VectorStoreIndex(
             nodes,
             storage_context=storage_context,
@@ -325,13 +315,11 @@ def build_automerging_index(document_text: str) -> VectorStoreIndex:
         if not leaf_nodes:
             raise Exception("No leaf nodes created for auto-merging index")
 
-        # Use LlamaIndex vectorstore for advanced operations
         llamaindex_vectorstore = st.session_state.get("llamaindex_vectorstore")
         if not llamaindex_vectorstore:
             raise Exception("LlamaIndex vectorstore not initialized")
 
         storage_context = StorageContext.from_defaults(vector_store=llamaindex_vectorstore)
-
         index = VectorStoreIndex(
             leaf_nodes,
             storage_context=storage_context,
@@ -349,12 +337,10 @@ def index_document(text_or_file: any) -> bool:
     try:
         print(f"Starting index_document with input type: {type(text_or_file)}")  # Debug
 
-        # Ensure components are initialized
         if not initialize_components():
             st.error("Failed to initialize RAG components")
             return False
 
-        # Parse document
         text_chunks = parse_document(text_or_file)
         print(f"Number of text chunks: {len(text_chunks)}")  # Debug
 
@@ -369,20 +355,17 @@ def index_document(text_or_file: any) -> bool:
             st.error("Document text is empty after processing.")
             return False
 
-        # Create/update vectorstore
-        print("Creating Pinecone vectorstore")  # Debug
-        langchain_vectorstore, llamaindex_vectorstore = create_pinecone_vectorstore(text_chunks)
+        print("Creating Qdrant vectorstore")  # Debug
+        langchain_vectorstore, llamaindex_vectorstore = create_qdrant_vectorstore(text_chunks)
         st.session_state["vectorstore"] = langchain_vectorstore
         st.session_state["llamaindex_vectorstore"] = llamaindex_vectorstore
 
-        # Build advanced indexes
         print("Building sentence window index")  # Debug
         sentence_window_index = build_sentence_window_index(document_text)
 
         print("Building auto-merging index")  # Debug
         automerging_index = build_automerging_index(document_text)
 
-        # Store in session state
         st.session_state["sentence_window_index"] = sentence_window_index
         st.session_state["automerging_index"] = automerging_index
         st.session_state["document_text"] = document_text
@@ -399,12 +382,13 @@ def clear_indexes():
     """Clear all indexes and vectorstore"""
     try:
         print("Starting clear_indexes")  # Debug
-        pc = st.session_state.get("pinecone_client")
-        if pc and INDEX_NAME in pc.list_indexes().names():
-            pc.delete_index(INDEX_NAME)
-            print(f"Pinecone index {INDEX_NAME} deleted")  # Debug
+        client = st.session_state.get("qdrant_client")
+        if client:
+            collections = client.get_collections()
+            if COLLECTION_NAME in [c.name for c in collections.collections]:
+                client.delete_collection(COLLECTION_NAME)
+                print(f"Qdrant collection {COLLECTION_NAME} deleted")  # Debug
 
-        # Clear session state
         keys_to_clear = [
             "sentence_window_index",
             "automerging_index",
@@ -424,22 +408,19 @@ def clear_indexes():
 def has_indexed_documents() -> bool:
     """Check if there are indexed documents available"""
     try:
-        # Check session state first
         if st.session_state.get("documents_indexed"):
             return True
 
-        # Check if we have active indexes
         if (st.session_state.get("sentence_window_index") and
                 st.session_state.get("automerging_index")):
             return True
 
-        # Check Pinecone index stats
-        if "pinecone_client" in st.session_state:
-            pc = st.session_state["pinecone_client"]
-            if INDEX_NAME in pc.list_indexes().names():
-                index = pc.Index(INDEX_NAME)
-                stats = index.describe_index_stats()
-                if stats.total_vector_count > 0:
+        if "qdrant_client" in st.session_state:
+            client = st.session_state["qdrant_client"]
+            collections = client.get_collections()
+            if COLLECTION_NAME in [c.name for c in collections.collections]:
+                collection_info = client.get_collection(COLLECTION_NAME)
+                if collection_info.points_count > 0:
                     st.session_state["documents_indexed"] = True
                     return True
 
@@ -453,14 +434,12 @@ def retrieve_and_generate(query: str, context_text: Optional[str] = None) -> str
     try:
         print(f"Starting retrieve_and_generate with query: {query[:50]}...")  # Debug
 
-        # Ensure LLM is properly set
         if not isinstance(Settings.llm, CustomLLM):
             if "llm" in st.session_state:
                 Settings.llm = CustomLLM(st.session_state["llm"])
             else:
                 return "LLM not properly initialized. Please configure the brain first."
 
-        # Check if we have advanced indexes
         if not st.session_state.get("sentence_window_index") or not st.session_state.get("automerging_index"):
             print("No advanced indexes found, using basic document chat")  # Debug
             document_text = st.session_state.get("uploaded_document", "")
@@ -484,7 +463,6 @@ def retrieve_and_generate(query: str, context_text: Optional[str] = None) -> str
 
             return response
 
-        # Use advanced RAG pipeline
         sentence_index = st.session_state["sentence_window_index"]
         auto_merging_index = st.session_state["automerging_index"]
 
@@ -525,7 +503,6 @@ def retrieve_and_generate(query: str, context_text: Optional[str] = None) -> str
         if context_text:
             final_response += f"\n\nContext Provided:\n{context_text}"
 
-        # Handle language translation
         chat_language = st.session_state.get("chat_language", "English")
         if chat_language == "Urdu":
             final_response = st.session_state["llm"].translate_to_urdu(final_response)
@@ -541,12 +518,11 @@ def retrieve_and_generate(query: str, context_text: Optional[str] = None) -> str
 # Auto-initialize on import if not already done
 if "rag_initialized" not in st.session_state:
     if initialize_components():
-        # Check for existing vectorstore
         if check_existing_vectorstore():
             st.session_state["rag_initialized"] = True
             print("RAG system auto-initialized with existing vectorstore")
         else:
-            st.session_state["rag_initialized"] = "partial"  # Components ready, no vectorstore
+            st.session_state["rag_initialized"] = "partial"
             print("RAG components initialized, no existing vectorstore found")
     else:
         st.session_state["rag_initialized"] = False
