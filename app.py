@@ -1,8 +1,11 @@
+#app.py
 import streamlit as st
 import openai
 import requests
 import json
-from typing import Optional, Dict, Any, List
+from apconfig import AppConfig
+from typing import Optional, Dict
+from rag_utils import index_document, retrieve_and_generate, clear_indexes,initialize_components , parse_document
 from enum import Enum
 import os
 from abc import ABC, abstractmethod
@@ -13,7 +16,6 @@ import bleach
 from typing import Tuple
 import firebase_admin
 from firebase_admin import credentials, auth, firestore
-from dotenv import load_dotenv
 from auth import (
     sign_in_with_email_and_password,
     get_account_info,
@@ -63,111 +65,7 @@ if not firebase_admin._apps:
 
 # Get Firestore client
 db = firestore.client()
-# Configuration for easy maintenance
-class AppConfig:
-    """Ustaad Jee's Knowledge Hub Configuration"""
-    MODELS = {
-        "OpenAI (GPT)": ["gpt-4o-mini", "gpt-4.1", "gpt-4-turbo", "gpt-4o"],
-        "Claude": ["claude-3-sonnet-20240229", "claude-3-opus-20240229", "claude-3-haiku-20240307",
-                   "claude-sonnet-4-20250514"],
-        "DeepSeek": ["deepseek-chat", "deepseek-coder", "deepseek-reasoner"],
-        "OpenRouter": ["anthropic/claude-3-sonnet", "openai/gpt-4", "meta-llama/llama-2-70b-chat",
-                       "deepseek/deepseek-chat", "google/gemini-pro"],
-        "Local LLM": ["llama3.2:3b", "llama3.2:1b", "llama3.1:8b", "llama3.1:70b", "deepseek-coder:6.7b",
-                      "deepseek-coder:33b", "deepseek-r1:1.5b", "deepseek-r1:7b", "deepseek-r1:14b", "deepseek-r1:32b",
-                      "deepseek-r1:70b", "codellama:7b", "codellama:13b", "codellama:34b", "mistral:7b",
-                      "mistral:instruct", "qwen2.5:7b", "qwen2.5:14b", "qwen2.5:32b", "phi3:mini", "phi3:medium",
-                      "gemma2:2b", "gemma2:9b", "gemma2:27b"]
-    }
 
-    URDU_TRANSLATION_PROMPT = """You are Ustaad Jee, an expert teacher translating complex technical documents from {source_lang} to friendly, easy {target_lang}. 🧑‍🏫
-GUIDELINES:
-1. Use simple, natural {target_lang} like you're chatting with a friend
-2. Break big sentences into small, clear ones
-3. Explain techy stuff with everyday examples
-4. Keep the technical meaning correct but super easy to read
-5. Use the glossary terms exactly as given
-6. Keep English tech terms in English but explain them in {target_lang}
-7. Add short notes in brackets for tricky concepts
-8. Sound warm and friendly, like explaining to a curious student
-9. Use common Urdu words people love
-{glossary_section}{context_section}
-DOCUMENT TO TRANSLATE:
-{text}
-TRANSLATION (in fun, easy {target_lang}):"""
-
-    ROMAN_URDU_TRANSLATION_PROMPT = """You are Ustaad Jee, an expert teacher translating complex technical documents from {source_lang} to friendly, easy Roman Urdu.
-GUIDELINES:
-1. Use simple, natural Roman Urdu like you're chatting with a friend
-2. Break big sentences into small, clear ones
-3. Explain techy stuff with everyday examples
-4. Keep the technical meaning correct but super easy to read
-5. Use the glossary terms exactly as given
-6. Keep English tech terms in English but explain them in Roman Urdu
-7. Add short notes in brackets for tricky concepts
-8. Sound warm and friendly, like explaining to a curious student
-9. Use fun Roman Urdu phrases like "Yeh basically...", "Is ka matlab hai ke...", "Jab aap..."
-{glossary_section}{context_section}
-DOCUMENT TO TRANSLATE:
-{text}
-TRANSLATION (in fun, easy Roman Urdu):"""
-
-    URDU_CHAT_PROMPT = """You are Ustaad Jee, a friendly teacher explaining technical stuff from a document in simple Urdu.
-INSTRUCTIONS:
-1. Answer in clear, friendly Urdu like you're talking to a student
-2. Use only the document for answers
-3. Break big ideas into small, easy sentences
-4. Use everyday examples to explain techy stuff
-5. Keep the meaning correct but super clear
-6. Use glossary terms as given
-7. Keep English tech terms but explain them in Urdu
-8. Add short notes in brackets for hard concepts
-9. Sound like a kind, patient teacher
-10. If the question isn't in the document, say so politely
-{glossary_section}
-DOCUMENT:
-{document_text}
-QUESTION:
-{question}
-ANSWER (in friendly Urdu):"""
-
-    ROMAN_URDU_CHAT_PROMPT = """You are Ustaad Jee, a friendly teacher explaining technical stuff from a document in simple Roman Urdu.
-INSTRUCTIONS:
-1. Answer in clear, friendly Roman Urdu like you're talking to a student
-2. Use only the document for answers
-3. Break big ideas into small, easy sentences
-4. Use everyday examples to explain techy stuff
-5. Keep the meaning correct but super easy to read
-6. Use glossary terms as given
-7. Keep English tech terms but explain them in Roman Urdu
-8. Add short notes in brackets for hard concepts
-9. Sound like a kind, patient teacher
-10. Use fun phrases like "Yeh basically...", "Is ka matlab hai ke..."
-11. If the question isn't in the document, say so politely
-{glossary_section}
-DOCUMENT:
-{document_text}
-QUESTION:
-{question}
-ANSWER (in friendly Roman Urdu):"""
-
-    ENGLISH_CHAT_PROMPT = """You are Ustaad Jee, a friendly teacher explaining technical stuff from a document in simple English.
-INSTRUCTIONS:
-1. Answer in clear, friendly English like you're talking to a student
-2. Use only the document for answers
-3. Break big ideas into small, easy sentences
-4. Use everyday examples to explain techy stuff
-5. Keep the meaning correct but super clear
-6. Use glossary terms as given
-7. Add short notes in brackets for hard concepts
-8. Sound like a kind, patient teacher
-9. If the question isn't in the document, say so politely
-{glossary_section}
-DOCUMENT:
-{document_text}
-QUESTION:
-{question}
-ANSWER (in friendly English):"""
 
 
 class LLMProvider(Enum):
@@ -452,40 +350,41 @@ class FeedbackDB:
             st.error(f"Error saving feedback: {str(e)}")
 
 
+
 def init_session_state():
+    # Initialize LLM
     if 'llm' not in st.session_state:
-        if st.session_state.get('is_admin', False):
-            st.session_state.llm = None
-            st.session_state.connection_status = "Not Connected"
-        else:
+        try:
+            api_key = st.secrets.get("OPENAI_API_KEY")
+            if not api_key:
+                st.error("OpenAI API key not found in Streamlit secrets or environment variables!")
+                st.session_state.connection_status = "Failed"
+                return
+            llm = LLMWrapper(
+                provider=LLMProvider.OPENAI,
+                api_key=api_key,
+                model="gpt-4o-mini"
+            )
             try:
-                # Prioritize st.secrets, then fallback to environment variable
-                api_key = st.secrets.get("OPENAI_API_KEY")
-                if not api_key:
-                    st.error("OpenAI API key not found in Streamlit secrets or environment variables!")
+                test_response = llm.generate("Test connection", max_tokens=10)
+                if test_response and "error" not in test_response.lower():
+                    st.session_state.llm = llm
+                    st.session_state.connection_status = "Connected"
+                else:
                     st.session_state.connection_status = "Failed"
-                    return
-                # Initialize LLMWrapper
-                llm = LLMWrapper(
-                    provider=LLMProvider.OPENAI,
-                    api_key=api_key,
-                    model="gpt-4o-mini"
-                )
-                # Test the connection with a simple prompt
-                try:
-                    test_response = llm.generate("Test connection", max_tokens=10)
-                    if test_response and "error" not in test_response.lower():
-                        st.session_state.llm = llm
-                        st.session_state.connection_status = "Connected"
-                    else:
-                        st.session_state.connection_status = "Failed"
-                        st.error("API test failed: Invalid response from OpenAI")
-                except Exception as e:
-                    st.session_state.connection_status = "Failed"
-                    st.error(f"API connection test failed: {str(e)}")
+                    st.error("API test failed: Invalid response from OpenAI")
             except Exception as e:
                 st.session_state.connection_status = "Failed"
-                st.error(f"Failed to initialize LLM: {str(e)}")
+                st.error(f"API connection test failed: {str(e)}")
+        except Exception as e:
+            st.session_state.connection_status = "Failed"
+            st.error(f"Failed to initialize LLM: {str(e)}")
+            st.session_state.llm = None
+
+    # Initialize embeddings, Pinecone, and other components
+    if 'embeddings' not in st.session_state or 'pinecone_client' not in st.session_state:
+        initialize_components()
+        print("Session State after initialize_components:", dict(st.session_state))  # Debug output
 
     # Initialize other session state variables
     if 'glossary' not in st.session_state:
@@ -510,6 +409,7 @@ def init_session_state():
         st.session_state.auth_success = ""
     if 'is_admin' not in st.session_state:
         st.session_state.is_admin = False
+
 
 def create_auth_interface():
     # Custom CSS for better styling
@@ -840,10 +740,7 @@ def create_auth_interface():
 
         st.markdown('</div>', unsafe_allow_html=True)
 
-
 def create_admin_interface():
-    """Create admin interface for managing users, viewing logs, and chat history."""
-    # Validate session state
     if not st.session_state.get('user_info') or not st.session_state.get('id_token'):
         st.error("Session expired. Please log in again.")
         return
@@ -851,122 +748,344 @@ def create_admin_interface():
         st.warning("You do not have admin access.")
         return
 
-    db = firestore.client()
+    try:
+        db = firestore.client()
+    except Exception as e:
+        st.error(f"Failed to initialize Firestore client: {str(e)}")
+        return
+
     st.markdown("### Admin Panel")
-    with st.expander("Admin Actions", expanded=False):
-        # Grant Admin Access
-        st.markdown("**Grant Admin Access**")
-        admin_email = st.text_input("Enter email to grant admin access", key="admin_email_input")
-        if st.button("Grant Admin Access", key="grant_admin_btn"):
-            try:
-                set_admin_user(admin_email)
-            except Exception as e:
-                st.error(f"Error granting admin access: {str(e)}")
+    tab1, tab2, tab3, tab4 = st.tabs(["User Management", "Document Management", "Activity Logs", "Chat History"])
 
-        # Revoke Admin Access
-        st.markdown("**Revoke Admin Access**")
-        revoke_email = st.text_input("Enter email to revoke admin access", key="revoke_email_input")
-        if st.button("Revoke Admin Access", key="revoke_admin_btn"):
-            try:
-                user = auth.get_user_by_email(revoke_email)
-                auth.set_custom_user_claims(user.uid, {"admin": False})
-                st.success(f"Admin access revoked for {revoke_email}. They must log out and log back in.")
-                log_user_activity(st.session_state.user_info['localId'], "revoke_admin", {"email": revoke_email})
-            except auth.UserNotFoundError:
-                st.error("Error: User not found or invalid email.")
-            except Exception as e:
-                st.error(f"Error revoking admin access: {str(e)}")
+    with tab1:
+        st.markdown("#### User Management")
+        col1, col2 = st.columns(2)
+        with col1:
+            st.markdown("**Grant Admin Access**")
+            admin_email = st.text_input("Enter email to grant admin access", key="admin_email_input")
+            if st.button("Grant Admin Access", key="grant_admin_btn"):
+                if admin_email.strip():
+                    try:
+                        set_admin_user(admin_email.strip())
+                        st.success(f"Admin access granted to {admin_email}")
+                        log_user_activity(
+                            st.session_state.user_info['localId'],
+                            "grant_admin",
+                            {"email": admin_email}
+                        )
+                    except Exception as e:
+                        st.error(f"Error granting admin access: {str(e)}")
+                else:
+                    st.warning("Please enter a valid email address.")
+        with col2:
+            st.markdown("**Revoke Admin Access**")
+            revoke_email = st.text_input("Enter email to revoke admin access", key="revoke_email_input")
+            if st.button("Revoke Admin Access", key="revoke_admin_btn"):
+                if revoke_email.strip():
+                    try:
+                        user = auth.get_user_by_email(revoke_email.strip())
+                        auth.set_custom_user_claims(user.uid, {"admin": False})
+                        st.success(f"Admin access revoked for {revoke_email}.")
+                        log_user_activity(
+                            st.session_state.user_info['localId'],
+                            "revoke_admin",
+                            {"email": revoke_email}
+                        )
+                    except auth.UserNotFoundError:
+                        st.error("Error: User not found or invalid email.")
+                    except Exception as e:
+                        st.error(f"Error revoking admin access: {str(e)}")
+                else:
+                    st.warning("Please enter a valid email address.")
 
-        # View Admin Logs
-        st.markdown("**View All User Activities (Admin Logs)**")
+    with tab2:
+        st.markdown("#### Document Management")
+        st.info("📈 Documents are processed with Sentence Window, Auto-merging, and Pinecone hosted embeddings.")
+        document_text, context_text = create_admin_input_interface()  # Use admin-specific input interface
+        has_documents = "sentence_window_index" in st.session_state or "automerging_index" in st.session_state
+        if has_documents:
+            st.success("📄 Document indexed!")
+            col1, col2 = st.columns(2)
+            with col1:
+                st.info("Current indexes: Sentence Window, Auto-merging, Pinecone")
+            with col2:
+                if st.button("Clear Current Indexes", key="admin_clear_indexes"):
+                    try:
+                        clear_indexes()
+                        st.session_state.admin_uploaded_document = ''
+                        st.session_state.admin_context_text = ''
+                        st.success("✅ All indexes cleared.")
+                        log_user_activity(
+                            st.session_state.user_info['localId'],
+                            "admin_clear_indexes",
+                            {"action": "cleared_all_indexes"}
+                        )
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"❌ Error clearing indexes: {str(e)}")
+        user_query = st.text_area(
+            "Ask a question about the indexed document:",
+            placeholder="e.g., What are the main topics covered? Summarize the key points.",
+            key="admin_rag_query",
+            height=100
+        )
+        if user_query.strip() and st.button("🔍 Get Answer", key="admin_rag_submit", type="primary"):
+            try:
+                with st.spinner("🔍 Searching through the indexed document..."):
+                    response = retrieve_and_generate(user_query, context_text)
+                    st.markdown("### 💡 Answer:")
+                    st.markdown(response)
+                    log_user_activity(
+                        st.session_state.user_info['localId'],
+                        "rag_query",
+                        {"query": user_query, "response_length": len(response), "context_length": len(context_text)}
+                    )
+            except Exception as e:
+                st.error(f"❌ Error getting answer: {str(e)}")
+
+    with tab3:
+        st.markdown("#### Activity Logs")
         try:
             filter_email = st.text_input("Filter by Email", key="log_filter_email")
-            query = db.collection("admin_logs").order_by("timestamp", direction=firestore.Query.DESCENDING).limit(50)
-            logs = query.get()
-            log_data = []
-            for log in logs:
-                log_dict = log.to_dict()
-                email = log_dict.get('email', 'Unknown')
-                if not filter_email or email.lower().find(filter_email.lower()) != -1:
-                    log_data.append({
-                        "User ID": log_dict['user_id'],
-                        "Email": email,
-                        "Action": log_dict['action'],
-                        "Details": str(log_dict['details']),
-                        "Timestamp": log_dict['timestamp']
-                    })
-            if log_data:
-                st.dataframe(pd.DataFrame(log_data), use_container_width=True)
-            else:
-                st.info("No admin logs available.")
+            limit = st.slider("Number of logs to fetch", min_value=10, max_value=200, value=50, key="admin_log_limit")
+            if st.button("Refresh Admin Logs", key="refresh_admin_logs"):
+                query = db.collection("admin_logs").order_by("timestamp", direction=firestore.Query.DESCENDING).limit(limit)
+                logs = query.get()
+                log_data = []
+                for log in logs:
+                    log_dict = log.to_dict()
+                    email = log_dict.get('email', 'Unknown')
+                    if not filter_email or filter_email.lower() in email.lower():
+                        log_data.append({
+                            "User ID": log_dict.get('user_id', 'Unknown'),
+                            "Email": email,
+                            "Action": log_dict.get('action', 'Unknown'),
+                            "Details": str(log_dict.get('details', '')),
+                            "Timestamp": log_dict.get('timestamp', 'Unknown')
+                        })
+                if log_data:
+                    df = pd.DataFrame(log_data)
+                    st.dataframe(df, use_container_width=True, height=400)
+                    csv = df.to_csv(index=False)
+                    st.download_button(
+                        label="Download Admin Logs as CSV",
+                        data=csv,
+                        file_name=f"admin_logs_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                        mime="text/csv"
+                    )
+                else:
+                    st.info("No admin logs found.")
         except Exception as e:
             st.error(f"Error fetching admin logs: {str(e)}")
 
-        # View User-Specific Logs
-        st.markdown("**View User-Specific Logs**")
+        st.markdown("**User Activity Logs**")
         try:
             user_log_filter_email = st.text_input("Filter User Logs by Email", key="user_log_filter_email")
-            user_log_data = []
-            users_with_logs = db.collection_group("logs").limit(1).get()
-            if users_with_logs:
-                all_users = {user.uid: user.email for user in auth.list_users().iterate_all()}
-                all_logs_query = db.collection_group("logs").order_by("timestamp",
-                                                                      direction=firestore.Query.DESCENDING).limit(50)
-                all_logs = all_logs_query.get()
-                for log_doc in all_logs:
-                    path_parts = log_doc.reference.path.split('/')
-                    if len(path_parts) >= 2:
-                        user_id = path_parts[1]
-                        user_email = all_users.get(user_id, 'Unknown')
-                        if not user_log_filter_email or user_email.lower().find(user_log_filter_email.lower()) != -1:
-                            log_dict = log_doc.to_dict()
+            user_limit = st.slider("Number of user logs to fetch", min_value=10, max_value=200, value=50, key="user_log_limit")
+            if st.button("Refresh User Logs", key="refresh_user_logs"):
+                user_log_data = []
+                all_users = db.collection("user_logs").stream()
+                for user in all_users:
+                    user_id = user.id
+                    user_logs = db.collection("user_logs").document(user_id).collection("logs").order_by(
+                        "timestamp", direction=firestore.Query.DESCENDING).limit(user_limit).get()
+                    for log in user_logs:
+                        log_dict = log.to_dict()
+                        email = log_dict.get('email', 'Unknown')
+                        if not user_log_filter_email or user_log_filter_email.lower() in email.lower():
                             user_log_data.append({
                                 "User ID": user_id,
-                                "Email": user_email,
-                                "Action": log_dict.get('action', ''),
+                                "Email": email,
+                                "Action": log_dict.get('action', 'Unknown'),
                                 "Details": str(log_dict.get('details', '')),
-                                "Timestamp": log_dict.get('timestamp')
+                                "Timestamp": log_dict.get('timestamp', 'Unknown')
                             })
-            if user_log_data:
-                st.dataframe(pd.DataFrame(user_log_data), use_container_width=True)
-            else:
-                st.info("No user logs available.")
+                if user_log_data:
+                    df = pd.DataFrame(user_log_data)
+                    st.dataframe(df, use_container_width=True, height=400)
+                    csv = df.to_csv(index=False)
+                    st.download_button(
+                        label="Download User Logs as CSV",
+                        data=csv,
+                        file_name=f"user_logs_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                        mime="text/csv"
+                    )
+                else:
+                    st.info("No user logs found.")
         except Exception as e:
             st.error(f"Error fetching user logs: {str(e)}")
 
-        # View User Chat History
-        st.markdown("**View User Chat History**")
+    with tab4:
+        st.markdown("#### Chat History")
         try:
             chat_filter_email = st.text_input("Filter Chat History by Email", key="chat_filter_email")
-            chat_data = []
-            chats_sample = db.collection_group("chats").limit(1).get()
-            if chats_sample:
-                all_users = {user.uid: user.email for user in auth.list_users().iterate_all()}
-                all_chats_query = db.collection_group("chats").order_by("timestamp",
-                                                                        direction=firestore.Query.DESCENDING).limit(50)
-                all_chats = all_chats_query.get()
-                for chat_doc in all_chats:
-                    path_parts = chat_doc.reference.path.split('/')
-                    if len(path_parts) >= 2:
-                        user_id = path_parts[1]
-                        user_email = all_users.get(user_id, 'Unknown')
-                        if not chat_filter_email or user_email.lower().find(chat_filter_email.lower()) != -1:
-                            chat_dict = chat_doc.to_dict()
+            chat_limit = st.slider("Number of chats to fetch", min_value=10, max_value=200, value=50, key="chat_limit")
+            if st.button("Refresh Chat History", key="refresh_chat_history"):
+                chat_data = []
+                all_users = db.collection("chat_history").stream()
+                for user in all_users:
+                    user_id = user.id
+                    user_chats = db.collection("chat_history").document(user_id).collection("chats").order_by(
+                        "timestamp", direction=firestore.Query.DESCENDING).limit(chat_limit).get()
+                    for chat in user_chats:
+                        chat_dict = chat.to_dict()
+                        email = chat_dict.get('email', 'Unknown')
+                        if not chat_filter_email or chat_filter_email.lower() in email.lower():
                             chat_data.append({
                                 "User ID": user_id,
-                                "Email": user_email,
-                                "Query": chat_dict.get('query', ''),
-                                "Response": chat_dict.get('response', ''),
-                                "Language": chat_dict.get('language', ''),
-                                "Type": chat_dict.get('type', ''),
-                                "Timestamp": chat_dict.get('timestamp')
+                                "Email": email,
+                                "Query": chat_dict.get('query', 'Unknown'),
+                                "Response": chat_dict.get('response', 'Unknown'),
+                                "Language": chat_dict.get('language', 'Unknown'),
+                                "Type": chat_dict.get('type', 'Unknown'),
+                                "Timestamp": chat_dict.get('timestamp', 'Unknown')
                             })
-            if chat_data:
-                st.dataframe(pd.DataFrame(chat_data), use_container_width=True)
-            else:
-                st.info("No chat history available.")
+                if chat_data:
+                    df = pd.DataFrame(chat_data)
+                    st.dataframe(df, use_container_width=True, height=400)
+                    csv = df.to_csv(index=False)
+                    st.download_button(
+                        label="Download Chat History as CSV",
+                        data=csv,
+                        file_name=f"chat_history_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                        mime="text/csv"
+                    )
+                else:
+                    st.info("No chat history found.")
         except Exception as e:
             st.error(f"Error fetching chat history: {str(e)}")
+
+def create_admin_input_interface() -> Tuple[Optional[str], Optional[str]]:
+    """
+    Create simplified interface for admin document uploads to vector database.
+    Only admins can upload and index documents to the vector store.
+    Returns: (document_text, context_text) tuple to maintain compatibility
+    """
+    if not st.session_state.get('is_admin', False):
+        st.warning("Only admins can access this section.")
+        return None, None
+
+    st.markdown("### Document Management (Admin Only)")
+    st.markdown("Upload documents to the vector database for enhanced RAG functionality.")
+
+    # File uploader for documents
+    uploaded_document = st.file_uploader(
+        "Upload Document to Vector Database",
+        type=["txt", "pdf"],
+        help="Upload a text or PDF file to be indexed in the vector database for RAG functionality.",
+        key="admin_document_upload"
+    )
+
+    document_text = None
+
+    if uploaded_document:
+        try:
+            with st.spinner("Processing document..."):
+                document_chunks = parse_document(uploaded_document)
+                document_text = "\n".join(document_chunks) if isinstance(document_chunks, list) else document_chunks
+                document_text = bleach.clean(document_text, tags=[], strip=True)
+
+                # Store in session state for display
+                st.session_state.admin_uploaded_document = document_text
+
+                # Log user activity if available
+                if st.session_state.get('user_info'):
+                    try:
+                        from user_management import log_user_activity  # Import here to avoid circular imports
+                        log_user_activity(
+                            st.session_state.user_info['localId'],
+                            "upload_document",
+                            {"document_length": len(document_text), "document_name": uploaded_document.name}
+                        )
+                    except ImportError:
+                        pass  # Skip logging if function not available
+
+                st.success(f"Document '{uploaded_document.name}' processed successfully!")
+
+                # Show document preview
+                with st.expander("Document Preview"):
+                    st.text_area(
+                        "Document Content",
+                        value=document_text[:1000] + "..." if len(document_text) > 1000 else document_text,
+                        height=200,
+                        disabled=True
+                    )
+                    st.caption(f"Document length: {len(document_text)} characters")
+
+        except Exception as e:
+            st.error(f"Failed to process document: {str(e)}")
+            return None, None
+
+    # Manual text input option
+    st.markdown("#### Or Enter Text Directly")
+    manual_text = st.text_area(
+        "Paste Document Text",
+        height=300,
+        placeholder="Paste your document text here to add to the vector database...",
+        help="Type or paste the document text for indexing.",
+        key="admin_manual_text_input"
+    )
+
+    if manual_text.strip():
+        document_text = bleach.clean(manual_text.strip(), tags=[], strip=True)
+        st.session_state.admin_uploaded_document = document_text
+
+    # Get final document text
+    final_document_text = st.session_state.get('admin_uploaded_document', '')
+
+    # Index button
+    if final_document_text and st.button("Index Document to Vector Database", key="admin_index_doc_btn", type="primary"):
+        try:
+            with st.spinner("Indexing document to vector database..."):
+                success = index_document(final_document_text)
+                if success:
+                    st.success("✅ Document indexed successfully to vector database!")
+                    st.info("The document is now available for RAG-enhanced queries.")
+
+                    # Log indexing activity
+                    if st.session_state.get('user_info'):
+                        try:
+                            from user_management import log_user_activity
+                            log_user_activity(
+                                st.session_state.user_info['localId'],
+                                "index_document",
+                                {"document_length": len(final_document_text)}
+                            )
+                        except ImportError:
+                            pass
+
+                    # Clear the session state
+                    st.session_state.pop('admin_uploaded_document', None)
+                    st.rerun()
+                else:
+                    st.error("❌ Failed to index document to vector database.")
+        except Exception as e:
+            st.error(f"Error during indexing: {str(e)}")
+
+    # Show current vector database status
+    st.markdown("#### Vector Database Status")
+    if st.session_state.get("vectorstore"):
+        st.success("✅ Vector database is active and ready for RAG queries")
+        if st.session_state.get("sentence_window_index") and st.session_state.get("automerging_index"):
+            st.info("🔍 Advanced RAG indexes are available (Sentence Window + Auto-merging)")
+        else:
+            st.info("📊 Basic vector store is available")
+    else:
+        st.warning("⚠️ No vector database found. Upload and index documents to enable RAG functionality.")
+
+    # Clear indexes button
+    if st.session_state.get("vectorstore") and st.button("Clear Vector Database", key="clear_vector_db", type="secondary"):
+        try:
+            from rag_utils import clear_indexes
+            clear_indexes()
+            st.success("Vector database cleared successfully!")
+            st.rerun()
+        except Exception as e:
+            st.error(f"Error clearing vector database: {str(e)}")
+
+    # Return both document_text and context_text for compatibility
+    # Since this is admin-focused on vector DB, context_text can be None or same as document_text
+    return final_document_text, None
 
 def create_llm_configuration_section():
     st.markdown("### Configure Ustaad Jee's Brain 🧠")
@@ -1032,7 +1151,7 @@ def create_llm_configuration_section():
                         if test_response:
                             st.success("Connection successful!")
                             st.session_state.connection_status = "Connected"
-                            st.session_state.llm = test_llm
+                            st.session_state.llm = test_llm  # Assign the new LLM to session state
                             log_user_activity(st.session_state.user_info['localId'], "llm_connection",
                                               {"provider": selected_provider, "model": selected_model})
                         else:
@@ -1197,53 +1316,82 @@ def create_glossary_section():
             st.write(f"**Total: {len(st.session_state.glossary)} terms**")
 
 
-def create_input_interface() -> Tuple[str, str]:
-    st.markdown("### Upload Your Document")
+def create_input_interface(admin_only: bool = False) -> Tuple[Optional[str], str]:
+    """
+    Create interface for uploading documents and context. All users can upload documents,
+    but only admins can index to Pinecone. Returns document text and context text.
+    """
+    document_text = None
+    st.markdown("### Upload Document")
+    # Use a unique key for the main interface file uploader
     uploaded_document = st.file_uploader(
         "Upload Document",
-        type=["txt","pdf"],
-        help="Upload a plain text file for Ustaad Jee to process.",
-        key="document_upload"
+        type=["txt", "pdf"],
+        help="Upload a text or PDF file for Ustaad Jee to process.",
+        key="main_document_upload"  # Unique key to avoid conflict
     )
-    document_text = st.session_state.uploaded_document
+    document_text = st.session_state.get('uploaded_document', '')
     if uploaded_document:
         try:
-            document_text = uploaded_document.read().decode("utf-8").strip()
-            document_text = bleach.clean(document_text)
-            st.session_state.uploaded_document = document_text
+            document_text = parse_document(uploaded_document)  # Calls rag_utils.parse_document
+            document_text_str = "\n".join(document_text) if isinstance(document_text, list) else document_text
+            document_text_str = bleach.clean(document_text_str, tags=[], strip=True)
+            st.session_state.uploaded_document = document_text_str
             if st.session_state.get('user_info'):
                 log_user_activity(
                     st.session_state.user_info['localId'],
                     "upload_document",
-                    {"document_length": len(document_text)}
+                    {"document_length": len(document_text_str), "document_name": uploaded_document.name}
                 )
-            st.success("Document uploaded successfully!")
+            st.success("Document uploaded and parsed successfully!")
         except Exception as e:
-            st.error(f"Failed to read document: {str(e)}")
+            st.error(f"Failed to parse document: {str(e)}")
 
-    document_text = st.text_area(
+    document_text_str = st.text_area(
         "Or Paste Your Document Here",
         value=document_text,
         height=300,
         placeholder="Paste your document text here...",
         help="Type or paste the document for Ustaad Jee.",
-        key="document_text_input"
+        key="main_document_text_input"  # Unique key
     )
-    document_text = bleach.clean(document_text.strip()) if document_text else ""
-    st.session_state.uploaded_document = document_text
+    document_text_str = bleach.clean(document_text_str.strip(), tags=[], strip=True) if document_text_str else ""
+    st.session_state.uploaded_document = document_text_str
+    document_text = parse_document(document_text_str) if document_text_str else None  # Calls rag_utils.parse_document
 
-    st.markdown("### Upload Additional Context")
+    if document_text and st.session_state.get('is_admin', False):
+        if st.button("Index Document", key="main_index_doc_btn", type="primary"):
+            try:
+                with st.spinner("Indexing document..."):
+                    success = index_document(document_text_str)
+                    if success:
+                        st.success("Document indexed successfully!")
+                        log_user_activity(
+                            st.session_state.user_info['localId'],
+                            "index_document",
+                            {"document_length": len(document_text_str)}
+                        )
+                        st.rerun()
+                    else:
+                        st.error("Failed to index document.")
+            except Exception as e:
+                st.error(f"Error indexing: {str(e)}")
+    elif document_text and not st.session_state.get('is_admin', False):
+        st.warning("Only admins can index documents to Pinecone.")
+
+    st.markdown("### Provide Additional Context")
     uploaded_context = st.file_uploader(
-        "Upload Context",
+        "Upload Context (Optional)",
         type=["txt"],
-        help="Upload a plain text file containing additional context for Ustaad Jee.",
-        key="context_upload"
+        help="Upload a text file with additional context for Ustaad Jee.",
+        key="main_context_upload"  # Unique key
     )
-    context_text = st.session_state.context_text
+    context_text = st.session_state.get('context_text', '')
     if uploaded_context:
         try:
-            context_text = uploaded_context.read().decode("utf-8").strip()
-            context_text = bleach.clean(context_text)
+            context_text = parse_document(uploaded_context)  # Calls rag_utils.parse_document
+            context_text = "\n".join(context_text) if isinstance(context_text, list) else context_text
+            context_text = bleach.clean(context_text, tags=[], strip=True)
             st.session_state.context_text = context_text
             if st.session_state.get('user_info'):
                 log_user_activity(
@@ -1251,32 +1399,50 @@ def create_input_interface() -> Tuple[str, str]:
                     "upload_context",
                     {"context_length": len(context_text)}
                 )
-            st.success("Context uploaded successfully!")
+            st.success("Context uploaded and parsed successfully!")
         except Exception as e:
-            st.error(f"Failed to read context file: {str(e)}")
+            st.error(f"Failed to parse context file: {str(e)}")
 
     context_text = st.text_area(
-        "Additional Context",
+        "Additional Context (Optional)",
         value=context_text,
         height=200,
-        placeholder="Type or paste your context here...",
-        help="Description about your document",
-        key="context_text_input"
+        placeholder="Type or paste additional context here...",
+        help="Provide extra information to guide Ustaad Jee's responses.",
+        key="main_context_text_input"  # Unique key
     )
-    context_text = bleach.clean(context_text.strip()) if context_text else ""
+    context_text = bleach.clean(context_text.strip(), tags=[], strip=True) if context_text else ""
     st.session_state.context_text = context_text
 
-    return document_text, context_text
+    return document_text_str, context_text
 
-
-def create_translation_and_chat_interface(document_text, context_text):
+def create_translation_and_chat_interface(document_text: str, context_text: Optional[str] = None) -> None:
+    """
+    Create interface for translation and chat with RAG for queries.
+    All users can use the chat with RAG, but only admins can upload/index documents.
+    """
     if not st.session_state.get('user_info'):
         st.warning("Please sign in to use Ustaad Jee!")
         return
+
     st.markdown("<h3>Interact with Ustaad Jee</h3>", unsafe_allow_html=True)
-    if not document_text:
-        st.warning("Please provide a document for Ustaad Jee to work with!")
-        return
+
+    # Check if RAG indexes are available
+    has_indexes = (
+            "sentence_window_index" in st.session_state
+            and "automerging_index" in st.session_state
+            and st.session_state.get("vectorstore")
+    )
+
+    # Display note about RAG usage
+    if has_indexes:
+        st.info("Using Retrieval-Augmented Generation (RAG) with indexed document, vector database, and provided context.")
+    else:
+        if not document_text and not context_text:
+            st.warning("No indexed document found. Please provide a document or context to ask questions!")
+        else:
+            st.info("No indexed document found. Answers will be based on provided document and/or context.")
+
     col1, col2, col3 = st.columns([2, 2, 1])
     with col1:
         translate_language = st.selectbox(
@@ -1298,8 +1464,7 @@ def create_translation_and_chat_interface(document_text, context_text):
         st.empty()
         st.write("")
         st.write("\n")
-        if st.button("Start Translation", type="primary",
-                     help="Translate the entire document"):
+        if st.button("Start Translation", type="primary", help="Translate the entire document"):
             if document_text and st.session_state.llm:
                 with st.spinner("Translating..."):
                     try:
@@ -1332,9 +1497,10 @@ def create_translation_and_chat_interface(document_text, context_text):
                                 "timestamp": time.time()
                             }
                         else:
+                            translation = document_text
                             chat_entry = {
                                 "query": "Translation Request",
-                                "response": document_text,
+                                "response": translation,
                                 "language": "English",
                                 "type": "translation",
                                 "timestamp": time.time()
@@ -1347,6 +1513,9 @@ def create_translation_and_chat_interface(document_text, context_text):
                         st.rerun()
                     except Exception as e:
                         st.error(f"Error: {str(e)}")
+            else:
+                st.warning("Please provide a document to translate!")
+
     st.markdown("---")
     st.markdown("**Ustaad Jee's Chat**")
     if st.session_state.chat_history:
@@ -1375,12 +1544,9 @@ def create_translation_and_chat_interface(document_text, context_text):
                     unsafe_allow_html=True
                 )
 
-                # Cute Rating System with minimal styling
+                # Feedback system
                 feedback_key = f"feedback_{i}_{chat.get('timestamp', time.time())}"
-
-                # Check if feedback has not been submitted
                 if feedback_key not in st.session_state or not st.session_state.get(feedback_key, False):
-                    # Custom CSS for cute, compact rating
                     st.markdown("""
                         <style>
                         .cute-rating .streamlit-expanderHeader {
@@ -1403,19 +1569,11 @@ def create_translation_and_chat_interface(document_text, context_text):
                     """, unsafe_allow_html=True)
 
                     with st.expander("Rate this response ", expanded=False):
-                        # Store rating in session state
                         rating_session_key = f"temp_rating_{feedback_key}"
                         if rating_session_key not in st.session_state:
                             st.session_state[rating_session_key] = 0
 
-                        # Inline star rating without extra text
-                        star_text = ""
-                        for star_num in range(1, 6):
-                            star_icon = "⭐" if star_num <= st.session_state[rating_session_key] else "⭐️"
-                            star_text += f'<span style="cursor: pointer; font-size: 18px; margin: 0 2px;" onclick="rate({star_num})">{star_icon}</span>'
-
-                        # Create inline star buttons
-                        cols = st.columns(7)  # 5 stars + submit + clear
+                        cols = st.columns(7)
                         for star_num in range(1, 6):
                             with cols[star_num - 1]:
                                 star_icon = "⭐" if star_num <= st.session_state[rating_session_key] else "☆"
@@ -1428,7 +1586,6 @@ def create_translation_and_chat_interface(document_text, context_text):
                                     st.session_state[rating_session_key] = star_num
                                     st.rerun()
 
-                        # Submit button
                         if st.session_state[rating_session_key] > 0:
                             with cols[5]:
                                 if st.button("✨", key=f"submit_{feedback_key}", type="primary", help="Submit rating"):
@@ -1449,19 +1606,14 @@ def create_translation_and_chat_interface(document_text, context_text):
                                     except Exception as e:
                                         st.error(f"Error submitting rating: {str(e)}")
 
-                            # Clear button
                             with cols[6]:
                                 if st.button("🧹", key=f"clear_{feedback_key}", help="Clear rating"):
                                     st.session_state[rating_session_key] = 0
                                     st.rerun()
-
                 else:
-                    # Show completed rating in a cute way
                     final_rating = st.session_state.get(f"final_rating_{feedback_key}", "N/A")
                     if final_rating != "N/A":
-                        stars_display = "⭐" * final_rating
-
-
+                        stars_display = "⭐" * int(final_rating)
                         with st.expander(f"{stars_display}", expanded=False):
                             st.markdown("*Thank you for the feedback!*")
                     else:
@@ -1475,7 +1627,7 @@ def create_translation_and_chat_interface(document_text, context_text):
 
     st.markdown("**Ask Ustaad Jee**")
     with st.form(key="chat_form", clear_on_submit=True):
-        col1, col2, col3 = st.columns([5, 2, 1])  # Adjusted column ratios for layout
+        col1, col2, col3 = st.columns([5, 2, 1])
         with col1:
             chat_query = st.text_input(
                 "Type your question...",
@@ -1494,66 +1646,54 @@ def create_translation_and_chat_interface(document_text, context_text):
             send_btn = st.form_submit_button("Send", type="primary", use_container_width=True)
         if send_btn:
             if quick_action != "Quick Action":
-                if document_text and st.session_state.llm:
-                    quick_queries = {
-                        "Summarize": "Provide a brief summary of the document.",
-                        "Key Points": "List the key points and main concepts of the document.",
-                        "Simplify": "Explain the document in a very simple way.",
-                        "Technical Terms": "List the key technical terms and their meanings."
-                    }
-                    with st.spinner(f"{quick_action}..."):
-                        try:
-                            response = st.session_state.llm.document_chat(
-                                document_text=document_text,
-                                question=quick_queries[quick_action],
-                                language=chat_language,
-                                glossary=st.session_state.glossary if st.session_state.glossary else None
-                            )
-                            chat_entry = {
-                                "query": quick_action,
-                                "response": response,
-                                "language": chat_language,
-                                "type": "quick_action",
-                                "timestamp": time.time()
-                            }
-                            st.session_state.chat_history.append(chat_entry)
-                            store_chat_history(st.session_state.user_info['localId'], chat_entry)
-                            log_user_activity(st.session_state.user_info['localId'], "quick_action",
-                                              {"action": quick_action.lower().replace(" ", "_")})
-                            st.rerun()
-                        except Exception as e:
-                            st.error(f"Error: {str(e)}")
-                elif not document_text:
-                    st.warning("Please provide a document to use quick actions!")
-                elif not st.session_state.llm:
-                    st.error("Please configure Ustaad Jee's brain first!")
+                quick_queries = {
+                    "Summarize": "Provide a brief summary of the document.",
+                    "Key Points": "List the key points and main concepts of the document.",
+                    "Simplify": "Explain the document in a very simple way.",
+                    "Technical Terms": "List the key technical terms and their meanings."
+                }
+                with st.spinner(f"{quick_action}..."):
+                    try:
+                        response = retrieve_and_generate(
+                            query=quick_queries[quick_action],
+                            context_text=context_text
+                        )
+                        chat_entry = {
+                            "query": quick_action,
+                            "response": response,
+                            "language": chat_language,
+                            "type": "quick_action",
+                            "timestamp": time.time()
+                        }
+                        st.session_state.chat_history.append(chat_entry)
+                        store_chat_history(st.session_state.user_info['localId'], chat_entry)
+                        log_user_activity(st.session_state.user_info['localId'], "quick_action",
+                                          {"action": quick_action.lower().replace(" ", "_")})
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Error: {str(e)}")
             elif chat_query:
                 chat_query = bleach.clean(chat_query.strip())
-                if st.session_state.llm:
-                    with st.spinner("Ustaad Jee is thinking..."):
-                        try:
-                            response = st.session_state.llm.document_chat(
-                                document_text=document_text,
-                                question=chat_query,
-                                language=chat_language,
-                                glossary=st.session_state.glossary if st.session_state.glossary else None
-                            )
-                            chat_entry = {
-                                "query": chat_query,
-                                "response": response,
-                                "language": chat_language,
-                                "type": "question",
-                                "timestamp": time.time()
-                            }
-                            st.session_state.chat_history.append(chat_entry)
-                            store_chat_history(st.session_state.user_info['localId'], chat_entry)
-                            log_user_activity(st.session_state.user_info['localId'], "chat",
-                                              {"query": chat_query, "language": chat_language})
-                            st.rerun()
-                        except Exception as e:
-                            st.error(f"Error: {str(e)}")
-                else:
-                    st.error("Please configure Ustaad Jee's brain first!")
+                with st.spinner("Ustaad Jee is thinking..."):
+                    try:
+                        response = retrieve_and_generate(
+                            query=chat_query,
+                            context_text=context_text
+                        )
+                        chat_entry = {
+                            "query": chat_query,
+                            "response": response,
+                            "language": chat_language,
+                            "type": "question",
+                            "timestamp": time.time()
+                        }
+                        st.session_state.chat_history.append(chat_entry)
+                        store_chat_history(st.session_state.user_info['localId'], chat_entry)
+                        log_user_activity(st.session_state.user_info['localId'], "chat",
+                                          {"query": chat_query, "language": chat_language})
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Error: {str(e)}")
             else:
                 st.warning("Please enter a question or select a quick action!")
 
