@@ -343,21 +343,21 @@ def retrieve_relevant_chunks(query: str, top_k: int = 5) -> Tuple[List[str], flo
 
 def generate_response(query: str, context_text: Optional[str] = None) -> str:
     try:
-        # Retrieve relevant chunks from Qdrant
+        # PRIMARY: Use the user's uploaded document
+        document_text = st.session_state.get("uploaded_document", "")
+        primary_context = f"DOCUMENT CONTENT:\n{document_text}\n\n" if document_text else ""
+
+        # SECONDARY: Retrieve relevant chunks from Qdrant
         relevant_chunks, confidence = retrieve_relevant_chunks(query)
         rag_context = "\n\n".join(relevant_chunks) if relevant_chunks else ""
+        supplementary_context = f"SUPPLEMENTARY INFORMATION:\n{rag_context}\n\n" if rag_context else ""
 
-        # Prepare context
-        full_context = ""
-        if rag_context:
-            full_context += f"Relevant Information:\n{rag_context}\n\n"
-        else:
-            # Fallback to st.session_state.uploaded_document if available
-            document_text = st.session_state.get("uploaded_document", "")
-            if document_text:
-                full_context += f"Document Content:\n{document_text}\n\n"
+        # Combine contexts (document first, vectorstore second)
+        full_context = primary_context + supplementary_context
+
+        # Additional user-provided context
         if context_text:
-            full_context += f"Additional Context:\n{context_text}\n\n"
+            full_context += f"USER CONTEXT:\n{context_text}\n\n"
 
         # Prepare glossary section
         glossary = st.session_state.get("glossary", {})
@@ -375,8 +375,6 @@ def generate_response(query: str, context_text: Optional[str] = None) -> str:
             except Exception as e:
                 print(f"Glossary formatting error: {str(e)}, Glossary content: {glossary}")
                 glossary_section = ""  # Fallback to empty string on error
-        # Debug: Log glossary content
-        print(f"Glossary: {glossary}, Formatted glossary_section: {glossary_section!r}")
 
         # Select and format prompt
         if full_context:

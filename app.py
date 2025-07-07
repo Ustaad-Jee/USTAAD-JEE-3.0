@@ -8,6 +8,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 import openai
+import hashlib
 import requests
 import json
 from apconfig import AppConfig
@@ -1007,11 +1008,18 @@ def create_glossary_section():
                 st.rerun()
         with col2:
             st.write(f"**Total: {len(st.session_state.glossary)} terms**")
+
+
+
+
 def create_input_interface(admin_only: bool = False) -> Tuple[Optional[str], str]:
-    """
-    Create interface for uploading documents and context. All users can upload documents,
-    but only admins can index to Qdrant. Returns document text and context text.
-    """
+    """Create interface for uploading documents and context"""
+    # Initialize document tracking
+    if 'document_hash' not in st.session_state:
+        st.session_state.document_hash = ""
+    if 'document_indexed' not in st.session_state:
+        st.session_state.document_indexed = False
+
     document_text = None
     st.markdown("### Upload Document")
     uploaded_document = st.file_uploader(
@@ -1020,20 +1028,32 @@ def create_input_interface(admin_only: bool = False) -> Tuple[Optional[str], str
         help="Upload a text or PDF file for Ustaad Jee to process.",
         key="main_document_upload"
     )
+
     document_text_str = st.session_state.get('uploaded_document', '')
     if uploaded_document:
         try:
             document_text = parse_document(uploaded_document)
-            document_text_str = "\n".join(document_text) if isinstance(document_text, list) else document_text
-            document_text_str = bleach.clean(document_text_str, tags=[], strip=True)
-            st.session_state.uploaded_document = document_text_str
-            if st.session_state.get('user_info'):
-                log_user_activity(
-                    st.session_state.user_info['localId'],
-                    "upload_document",
-                    {"document_length": len(document_text_str), "document_name": uploaded_document.name}
-                )
-            st.success("Document uploaded and parsed successfully!")
+            new_text = "\n".join(document_text) if isinstance(document_text, list) else document_text
+            new_text = bleach.clean(new_text, tags=[], strip=True)
+
+            # Generate hash to prevent re-indexing
+            new_hash = hashlib.md5(new_text.encode()).hexdigest()
+
+            # Only update if document changed
+            if new_hash != st.session_state.document_hash:
+                st.session_state.uploaded_document = new_text
+                st.session_state.document_hash = new_hash
+                st.session_state.document_indexed = False  # Reset indexing status
+
+                if st.session_state.get('user_info'):
+                    log_user_activity(
+                        st.session_state.user_info['localId'],
+                        "upload_document",
+                        {"document_length": len(new_text), "document_name": uploaded_document.name}
+                    )
+                st.success("Document uploaded and parsed successfully!")
+            else:
+                st.info("Document content unchanged - using existing version")
         except Exception as e:
             st.error(f"Failed to parse document: {str(e)}")
 
@@ -1045,27 +1065,41 @@ def create_input_interface(admin_only: bool = False) -> Tuple[Optional[str], str
         help="Type or paste the document for Ustaad Jee.",
         key="main_document_text_input"
     )
+
+    # Update hash if text changes
+    if document_text_str:
+        new_hash = hashlib.md5(document_text_str.encode()).hexdigest()
+        if new_hash != st.session_state.document_hash:
+            st.session_state.uploaded_document = document_text_str
+            st.session_state.document_hash = new_hash
+            st.session_state.document_indexed = False  # Reset indexing status
+
     document_text_str = bleach.clean(document_text_str.strip(), tags=[], strip=True) if document_text_str else ""
     st.session_state.uploaded_document = document_text_str
     document_text = parse_document(document_text_str) if document_text_str else None
 
+    # Admin indexing section
     if document_text and st.session_state.get('is_admin', False):
-        if st.button("Index Document to Qdrant Vector Database", key="main_index_doc_btn", type="primary"):
-            try:
-                with st.spinner("Indexing document to Qdrant..."):
-                    success = index_document(document_text_str)
-                    if success:
-                        st.success("Document indexed successfully to Qdrant vector database!")
-                        log_user_activity(
-                            st.session_state.user_info['localId'],
-                            "index_document",
-                            {"document_length": len(document_text_str)}
-                        )
-                        st.rerun()
-                    else:
-                        st.error("Failed to index document to Qdrant vector database.")
-            except Exception as e:
-                st.error(f"Error indexing to Qdrant: {str(e)}")
+        if st.session_state.document_indexed:
+            st.success("✅ Document already indexed to Qdrant vector database!")
+        else:
+            if st.button("Index Document to Qdrant Vector Database", key="main_index_doc_btn", type="primary"):
+                try:
+                    with st.spinner("Indexing document to Qdrant..."):
+                        success = index_document(document_text_str)
+                        if success:
+                            st.success("Document indexed successfully to Qdrant vector database!")
+                            st.session_state.document_indexed = True  # Mark as indexed
+                            log_user_activity(
+                                st.session_state.user_info['localId'],
+                                "index_document",
+                                {"document_length": len(document_text_str)}
+                            )
+                            st.rerun()
+                        else:
+                            st.error("Failed to index document to Qdrant vector database.")
+                except Exception as e:
+                    st.error(f"Error indexing to Qdrant: {str(e)}")
     elif document_text and not st.session_state.get('is_admin', False):
         st.warning("Only admins can index documents to Qdrant vector database.")
 
