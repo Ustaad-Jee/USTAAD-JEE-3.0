@@ -7,17 +7,17 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded"
 )
-
 import openai
 import requests
 import json
 from apconfig import AppConfig
 from typing import Optional, Dict
-from rag_utils import index_document, retrieve_and_generate, clear_indexes,initialize_components , parse_document
+from rag_utils import index_document, generate_response, clear_indexes, initialize_components, parse_document
 from enum import Enum
 import os
 from abc import ABC, abstractmethod
 import pandas as pd
+from llm_utils import LLMWrapper, LLMProvider
 import io
 import time
 import bleach
@@ -74,269 +74,6 @@ if not firebase_admin._apps:
 # Get Firestore client
 db = firestore.client()
 
-
-
-class LLMProvider(Enum):
-    OPENAI = "openai"
-    CLAUDE = "claude"
-    DEEPSEEK = "deepseek"
-    OPENROUTER = "openrouter"
-    LOCAL = "local"
-
-
-class BaseLLMClient(ABC):
-    @abstractmethod
-    def generate(self, prompt: str, **kwargs) -> str:
-        pass
-
-
-class OpenAIClient(BaseLLMClient):
-    def __init__(self, api_key: str, model: str = "gpt-4o-mini"):
-        try:
-            self.client = openai.OpenAI(api_key=api_key)
-            self.model = model
-        except Exception as e:
-            raise Exception(f"Error connecting to OpenAI: {str(e)}")
-
-    def generate(self, prompt: str, **kwargs) -> str:
-        try:
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=[{"role": "user", "content": prompt}],
-                max_tokens=kwargs.get("max_tokens", 2000),
-                temperature=kwargs.get("temperature", 0.3)
-            )
-            return response.choices[0].message.content.strip()
-        except Exception as e:
-            raise Exception(f"OpenAI error: {str(e)}")
-
-
-class ClaudeClient(BaseLLMClient):
-    def __init__(self, api_key: str, model: str = "claude-3-sonnet-20240229"):
-        self.api_key = api_key
-        self.model = model
-        self.base_url = "https://api.anthropic.com/v1/messages"
-
-    def generate(self, prompt: str, **kwargs) -> str:
-        try:
-            headers = {
-                "x-api-key": self.api_key,
-                "anthropic-version": "2023-06-01",
-                "content-type": "application/json"
-            }
-            data = {
-                "model": self.model,
-                "max_tokens": kwargs.get("max_tokens", 2000),
-                "messages": [{"role": "user", "content": prompt}]
-            }
-            response = requests.post(self.base_url, headers=headers, json=data, timeout=60)
-            response.raise_for_status()
-            result = response.json()
-            return result["content"][0]["text"].strip()
-        except Exception as e:
-            raise Exception(f"Claude error: {str(e)}")
-
-
-class DeepSeekClient(BaseLLMClient):
-    def __init__(self, api_key: str, model: str = "deepseek-chat"):
-        self.api_key = api_key
-        self.model = model
-        self.base_url = "https://api.deepseek.com/v1/chat/completions"
-
-    def generate(self, prompt: str, **kwargs) -> str:
-        try:
-            headers = {
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json"
-            }
-            data = {
-                "model": self.model,
-                "messages": [{"role": "user", "content": prompt}],
-                "max_tokens": kwargs.get("max_tokens", 2000),
-                "temperature": kwargs.get("temperature", 0.3)
-            }
-            response = requests.post(self.base_url, headers=headers, json=data, timeout=60)
-            response.raise_for_status()
-            result = response.json()
-            return result["choices"][0]["message"]["content"].strip()
-        except Exception as e:
-            raise Exception(f"DeepSeek error: {str(e)}")
-
-
-class OpenRouterClient(BaseLLMClient):
-    def __init__(self, api_key: str, model: str = "anthropic/claude-3-sonnet"):
-        self.api_key = api_key
-        self.model = model
-        self.base_url = "https://openrouter.ai/api/v1/chat/completions"
-
-    def generate(self, prompt: str, **kwargs) -> str:
-        try:
-            headers = {
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json",
-                "HTTP-Referer": kwargs.get("app_url", "https://localhost:8501"),
-                "X-Title": kwargs.get("app_name", "Ustaad Jee")
-            }
-            data = {
-                "model": self.model,
-                "messages": [{"role": "user", "content": prompt}],
-                "max_tokens": kwargs.get("max_tokens", 2000),
-                "temperature": kwargs.get("temperature", 0.3)
-            }
-            response = requests.post(self.base_url, headers=headers, json=data, timeout=60)
-            response.raise_for_status()
-            result = response.json()
-            return result["choices"][0]["message"]["content"].strip()
-        except Exception as e:
-            raise Exception(f"OpenRouter error: {str(e)}")
-
-
-class LocalLLMClient(BaseLLMClient):
-    def __init__(self, base_url: str = "http://localhost:11434", model: str = "llama3.2:3b"):
-        self.base_url = base_url.rstrip('/')
-        self.model = model
-
-    def generate(self, prompt: str, **kwargs) -> str:
-        try:
-            url = f"{self.base_url}/api/generate"
-            data = {
-                "model": self.model,
-                "prompt": prompt,
-                "stream": False,
-                "options": {
-                    "temperature": kwargs.get("temperature", 0.3),
-                    "num_predict": kwargs.get("max_tokens", 2000)
-                }
-            }
-            response = requests.post(url, json=data, timeout=120)
-            response.raise_for_status()
-            result = response.json()
-            return result.get("response", "").strip()
-        except Exception as e:
-            raise Exception(f"Local LLM error: {str(e)}")
-
-class LLMWrapper:
-    def __init__(self, provider: LLMProvider = LLMProvider.OPENAI, **config):
-        self.provider = provider
-        self.config = config
-        self.client = None
-        self._initialize_client()
-
-    def _initialize_client(self) -> None:
-        try:
-            if self.provider == LLMProvider.OPENAI:
-                # Check st.secrets first, then config, then environment variable
-                api_key = self.config.get("api_key") or st.secrets.get("OPENAI_API_KEY")
-                if not api_key:
-                    raise Exception("OpenAI API key required! Please set it in Streamlit secrets or provide it manually.")
-                model = self.config.get("model", "gpt-4o-mini")
-                self.client = OpenAIClient(api_key, model)
-            elif self.provider == LLMProvider.CLAUDE:
-                api_key = self.config.get("api_key") or st.secrets.get("ANTHROPIC_API_KEY") or os.getenv("ANTHROPIC_API_KEY")
-                if not api_key:
-                    raise Exception("Claude API key required!")
-                model = self.config.get("model", "claude-3-sonnet-20240229")
-                self.client = ClaudeClient(api_key, model)
-            elif self.provider == LLMProvider.DEEPSEEK:
-                api_key = self.config.get("api_key") or st.secrets.get("DEEPSEEK_API_KEY") or os.getenv("DEEPSEEK_API_KEY")
-                if not api_key:
-                    raise Exception("DeepSeek API key required!")
-                model = self.config.get("model", "deepseek-chat")
-                self.client = DeepSeekClient(api_key, model)
-            elif self.provider == LLMProvider.OPENROUTER:
-                api_key = self.config.get("api_key") or st.secrets.get("OPENROUTER_API_KEY") or os.getenv("OPENROUTER_API_KEY")
-                if not api_key:
-                    raise Exception("OpenRouter API key required!")
-                model = self.config.get("model", "anthropic/claude-3-sonnet")
-                self.client = OpenRouterClient(api_key, model)
-            elif self.provider == LLMProvider.LOCAL:
-                base_url = self.config.get("base_url", "http://localhost:11434")
-                model = self.config.get("model", "llama3.2:3b")
-                self.client = LocalLLMClient(base_url, model)
-            else:
-                raise ValueError(f"Unknown provider: {self.provider}")
-        except Exception as e:
-            st.error(f"Connection error: {str(e)}")
-            self.client = None
-
-    def switch_provider(self, provider: LLMProvider, **config):
-        self.provider = provider
-        self.config.update(config)
-        self._initialize_client()
-
-    def generate(self, prompt: str, **kwargs) -> str:
-        if not self.client:
-            raise Exception("LLM not initialized!")
-        return self.client.generate(prompt, **kwargs)
-
-    def translate_to_urdu(self, text: str, glossary: Optional[Dict[str, str]] = None, context: Optional[str] = None,
-                          **kwargs) -> str:
-        glossary_section = ""
-        if glossary:
-            glossary_section = "\n\nGLOSSARY:\n"
-            for english_term, urdu_term in glossary.items():
-                glossary_section += f"- {english_term} → {urdu_term}\n"
-        context_section = ""
-        if context:
-            context_section = f"\n\nCONTEXT:\n{context}\n"
-        prompt = AppConfig.URDU_TRANSLATION_PROMPT.format(
-            source_lang="English",
-            target_lang="Urdu",
-            glossary_section=glossary_section,
-            context_section=context_section,
-            text=text
-        )
-        return self.generate(prompt, **kwargs)
-
-    def translate_to_roman_urdu(self, text: str, glossary: Optional[Dict[str, str]] = None,
-                                context: Optional[str] = None, **kwargs) -> str:
-        glossary_section = ""
-        if glossary:
-            glossary_section = "\n\nGLOSSARY:\n"
-            for english_term, urdu_term in glossary.items():
-                glossary_section += f"- {english_term} → {urdu_term}\n"
-        context_section = ""
-        if context:
-            context_section = f"\n\nCONTEXT:\n{context}\n"
-        prompt = AppConfig.ROMAN_URDU_TRANSLATION_PROMPT.format(
-            source_lang="English",
-            target_lang="Roman Urdu",
-            glossary_section=glossary_section,
-            context_section=context_section,
-            text=text
-        )
-        return self.generate(prompt, **kwargs)
-
-    def document_chat(self, document_text: str, question: str, language: str = "English",
-                      glossary: Optional[Dict[str, str]] = None, **kwargs) -> str:
-        glossary_section = ""
-        if glossary:
-            glossary_section = "\n\nGLOSSARY:\n"
-            for english_term, urdu_term in glossary.items():
-                glossary_section += f"- {english_term} → {urdu_term}\n"
-
-        if language == "Urdu":
-            prompt = AppConfig.URDU_CHAT_PROMPT.format(
-                glossary_section=glossary_section,
-                document_text=document_text,
-                question=question
-            )
-        elif language == "Roman Urdu":
-            prompt = AppConfig.ROMAN_URDU_CHAT_PROMPT.format(
-                glossary_section=glossary_section,
-                document_text=document_text,
-                question=question
-            )
-        else:
-            prompt = AppConfig.ENGLISH_CHAT_PROMPT.format(
-                glossary_section=glossary_section,
-                document_text=document_text,
-                question=question
-            )
-
-        return self.generate(prompt, temperature=0.3, max_tokens=2000, **kwargs)
-
-
 class FeedbackDB:
     def __init__(self):
         # Initialize Firestore feedback collection (no in-memory storage needed)
@@ -356,67 +93,57 @@ class FeedbackDB:
             log_user_activity(user_id, "submit_feedback", {"rating": rating})
         except Exception as e:
             st.error(f"Error saving feedback: {str(e)}")
+@st.cache_data(show_spinner="Parsing document...", ttl=3600)
+def cached_parse_document(document: any) -> list:
+    return parse_document(document)
 
+@st.cache_data(show_spinner="Indexing document...", ttl=3600)
+def cached_index_document(document_text: str) -> bool:
+    return index_document(document_text)
 
-
+@st.cache_data()
+def cached_retrieve_and_generate(query: str, context_text: str, index_version: int) -> str:
+    return generate_response(query, context_text)
 def init_session_state():
-    # Initialize LLM
     if 'llm' not in st.session_state:
         try:
             api_key = st.secrets.get("OPENAI_API_KEY")
             if not api_key:
-                st.error("OpenAI API key not found in Streamlit secrets or environment variables!")
+                st.error("OpenAI API key not found!")
                 st.session_state.connection_status = "Failed"
                 return
+
             llm = LLMWrapper(
                 provider=LLMProvider.OPENAI,
                 api_key=api_key,
                 model="gpt-4o-mini"
             )
-            try:
-                test_response = llm.generate("Test connection", max_tokens=10)
-                if test_response and "error" not in test_response.lower():
-                    st.session_state.llm = llm
-                    st.session_state.connection_status = "Connected"
-                else:
-                    st.session_state.connection_status = "Failed"
-                    st.error("API test failed: Invalid response from OpenAI")
-            except Exception as e:
-                st.session_state.connection_status = "Failed"
-                st.error(f"API connection test failed: {str(e)}")
+            st.session_state.llm = llm
+            st.session_state.connection_status = "Connected"
         except Exception as e:
             st.session_state.connection_status = "Failed"
             st.error(f"Failed to initialize LLM: {str(e)}")
-            st.session_state.llm = None
 
-    # Initialize embeddings, Pinecone, and other components
-    if 'embeddings' not in st.session_state or 'pinecone_client' not in st.session_state:
+    if 'embeddings' not in st.session_state or 'qdrant_client' not in st.session_state:
         initialize_components()
-        print("Session State after initialize_components:", dict(st.session_state))  # Debug output
 
-    # Initialize other session state variables
-    if 'glossary' not in st.session_state:
-        st.session_state.glossary = {}
-    if 'connection_status' not in st.session_state:
-        st.session_state.connection_status = "Not Connected"
-    if 'results' not in st.session_state:
-        st.session_state.results = {}
-    if 'glossary_updated' not in st.session_state:
-        st.session_state.glossary_updated = False
-    if 'chat_history' not in st.session_state:
-        st.session_state.chat_history = []
-    if 'feedback_db' not in st.session_state:
-        st.session_state.feedback_db = FeedbackDB()
-    if 'uploaded_document' not in st.session_state:
-        st.session_state.uploaded_document = ""
-    if 'context_text' not in st.session_state:
-        st.session_state.context_text = ""
-    if 'auth_warning' not in st.session_state:
-        st.session_state.auth_warning = ""
-    if 'auth_success' not in st.session_state:
-        st.session_state.auth_success = ""
-    if 'is_admin' not in st.session_state:
-        st.session_state.is_admin = False
+    default_state = {
+        'glossary': {},
+        'connection_status': "Not Connected",
+        'results': {},
+        'glossary_updated': False,
+        'chat_history': [],
+        'uploaded_document': "",
+        'context_text': "",
+        'auth_warning': "",
+        'auth_success': "",
+        'is_admin': False,
+        'index_version': 0  # For cache invalidation
+    }
+
+    for key, value in default_state.items():
+        if key not in st.session_state:
+            st.session_state[key] = value
 
 
 def create_auth_interface():
@@ -944,12 +671,8 @@ def create_admin_interface():
         except Exception as e:
             st.error(f"Error fetching chat history: {str(e)}")
 
+
 def create_admin_input_interface() -> Tuple[Optional[str], Optional[str]]:
-    """
-    Create simplified interface for admin document uploads to Qdrant vector database.
-    Only admins can upload and index documents to the vector store.
-    Returns: (document_text, context_text) tuple to maintain compatibility
-    """
     if not st.session_state.get('is_admin', False):
         st.warning("Only admins can access this section.")
         return None, None
@@ -957,7 +680,6 @@ def create_admin_input_interface() -> Tuple[Optional[str], Optional[str]]:
     st.markdown("### Document Management (Admin Only)")
     st.markdown("Upload documents to the Qdrant vector database for enhanced RAG functionality.")
 
-    # File uploader for documents
     uploaded_document = st.file_uploader(
         "Upload Document to Qdrant Vector Database",
         type=["txt", "pdf"],
@@ -970,38 +692,22 @@ def create_admin_input_interface() -> Tuple[Optional[str], Optional[str]]:
     if uploaded_document:
         try:
             with st.spinner("Processing document..."):
-                document_chunks = parse_document(uploaded_document)
+                document_chunks = cached_parse_document(uploaded_document)
                 document_text = "\n".join(document_chunks) if isinstance(document_chunks, list) else document_chunks
                 document_text = bleach.clean(document_text, tags=[], strip=True)
-
-                # Store in session state for display
                 st.session_state.admin_uploaded_document = document_text
 
-                # Log user activity
                 if st.session_state.get('user_info'):
                     log_user_activity(
                         st.session_state.user_info['localId'],
                         "upload_document",
                         {"document_length": len(document_text), "document_name": uploaded_document.name}
                     )
-
                 st.success(f"Document '{uploaded_document.name}' processed successfully!")
-
-                # Show document preview
-                with st.expander("Document Preview"):
-                    st.text_area(
-                        "Document Content",
-                        value=document_text[:1000] + "..." if len(document_text) > 1000 else document_text,
-                        height=200,
-                        disabled=True
-                    )
-                    st.caption(f"Document length: {len(document_text)} characters")
-
         except Exception as e:
             st.error(f"Failed to process document: {str(e)}")
             return None, None
 
-    # Manual text input option
     st.markdown("#### Or Enter Text Directly")
     manual_text = st.text_area(
         "Paste Document Text",
@@ -1015,35 +721,35 @@ def create_admin_input_interface() -> Tuple[Optional[str], Optional[str]]:
         document_text = bleach.clean(manual_text.strip(), tags=[], strip=True)
         st.session_state.admin_uploaded_document = document_text
 
-    # Get final document text
     final_document_text = st.session_state.get('admin_uploaded_document', '')
 
-    # Index button
-    if final_document_text and st.button("Index Document to Qdrant Vector Database", key="admin_index_doc_btn", type="primary"):
+    if final_document_text:
+        with st.expander("Document Preview"):
+            st.text_area(
+                "Document Content",
+                value=final_document_text[:1000] + "..." if len(final_document_text) > 1000 else final_document_text,
+                height=200,
+                disabled=True
+            )
+            st.caption(f"Document length: {len(final_document_text)} characters")
+
+    if final_document_text and st.button("Index Document to Qdrant Vector Database", key="admin_index_doc_btn",
+                                         type="primary"):
         try:
-            with st.spinner("Indexing document to Qdrant vector database..."):
-                success = index_document(final_document_text)
-                if success:
-                    st.success("✅ Document indexed successfully to Qdrant vector database!")
-                    st.info("The document is now available for RAG-enhanced queries.")
-
-                    # Log indexing activity
-                    if st.session_state.get('user_info'):
-                        log_user_activity(
-                            st.session_state.user_info['localId'],
-                            "index_document",
-                            {"document_length": len(final_document_text)}
-                        )
-
-                    # Clear the session state
-                    st.session_state.pop('admin_uploaded_document', None)
-                    st.rerun()
-                else:
-                    st.error("❌ Failed to index document to Qdrant vector database.")
+            success = cached_index_document(final_document_text)
+            if success:
+                st.success("✅ Document indexed successfully!")
+                st.session_state.index_version += 1
+                if st.session_state.get('user_info'):
+                    log_user_activity(
+                        st.session_state.user_info['localId'],
+                        "index_document",
+                        {"document_length": len(final_document_text)}
+                    )
+                st.rerun()
         except Exception as e:
             st.error(f"Error during indexing: {str(e)}")
 
-    # Show current vector database status
     st.markdown("#### Qdrant Vector Database Status")
     if st.session_state.get("vectorstore"):
         st.success("✅ Qdrant vector database is active and ready for RAG queries")
@@ -1054,8 +760,8 @@ def create_admin_input_interface() -> Tuple[Optional[str], Optional[str]]:
     else:
         st.warning("⚠️ No Qdrant vector database found. Upload and index documents to enable RAG functionality.")
 
-    # Clear indexes button
-    if st.session_state.get("vectorstore") and st.button("Clear Qdrant Vector Database", key="clear_vector_db", type="secondary"):
+    if st.session_state.get("vectorstore") and st.button("Clear Qdrant Vector Database", key="clear_vector_db",
+                                                         type="secondary"):
         try:
             clear_indexes()
             st.session_state.admin_uploaded_document = ''
@@ -1066,11 +772,11 @@ def create_admin_input_interface() -> Tuple[Optional[str], Optional[str]]:
                 "clear_qdrant_indexes",
                 {"action": "cleared_qdrant_indexes"}
             )
+            st.session_state.index_version += 1
             st.rerun()
         except Exception as e:
             st.error(f"Error clearing Qdrant vector database: {str(e)}")
 
-    # Return both document_text and context_text for compatibility
     return final_document_text, None
 
 
@@ -1301,9 +1007,6 @@ def create_glossary_section():
                 st.rerun()
         with col2:
             st.write(f"**Total: {len(st.session_state.glossary)} terms**")
-
-
-
 def create_input_interface(admin_only: bool = False) -> Tuple[Optional[str], str]:
     """
     Create interface for uploading documents and context. All users can upload documents,
@@ -1403,26 +1106,19 @@ def create_input_interface(admin_only: bool = False) -> Tuple[Optional[str], str
 
     return document_text_str, context_text
 
-
 def create_translation_and_chat_interface(document_text: str, context_text: Optional[str] = None) -> None:
-    """
-    Create interface for translation and chat with RAG for queries.
-    All users can use the chat with RAG, but only admins can upload/index documents.
-    """
     if not st.session_state.get('user_info'):
         st.warning("Please sign in to use Ustaad Jee!")
         return
 
     st.markdown("<h3>Interact with Ustaad Jee</h3>", unsafe_allow_html=True)
 
-    # Check if RAG indexes are available
     has_indexes = (
-            "sentence_window_index" in st.session_state
-            and "automerging_index" in st.session_state
-            and st.session_state.get("vectorstore")
+        "sentence_window_index" in st.session_state
+        and "automerging_index" in st.session_state
+        and st.session_state.get("vectorstore")
     )
 
-    # Display note about RAG usage
     col1, col2, col3 = st.columns([2, 2, 1])
     with col1:
         translate_language = st.selectbox(
@@ -1439,11 +1135,6 @@ def create_translation_and_chat_interface(document_text: str, context_text: Opti
             help="Select the language for responses."
         )
     with col3:
-        st.empty()
-        st.empty()
-        st.empty()
-        st.write("")
-        st.write("\n")
         if st.button("Start Translation", type="primary", help="Translate the entire document"):
             if document_text and st.session_state.llm:
                 with st.spinner("Translating..."):
@@ -1524,7 +1215,6 @@ def create_translation_and_chat_interface(document_text: str, context_text: Opti
                     unsafe_allow_html=True
                 )
 
-                # Feedback system
                 feedback_key = f"feedback_{i}_{chat.get('timestamp', time.time())}"
                 if feedback_key not in st.session_state or not st.session_state.get(feedback_key, False):
                     st.markdown("""
@@ -1634,9 +1324,10 @@ def create_translation_and_chat_interface(document_text: str, context_text: Opti
                 }
                 with st.spinner(f"{quick_action}..."):
                     try:
-                        response = retrieve_and_generate(
+                        response = cached_retrieve_and_generate(
                             query=quick_queries[quick_action],
-                            context_text=context_text
+                            context_text=context_text or "",
+                            index_version=st.session_state.index_version
                         )
                         chat_entry = {
                             "query": quick_action,
@@ -1656,9 +1347,10 @@ def create_translation_and_chat_interface(document_text: str, context_text: Opti
                 chat_query = bleach.clean(chat_query.strip())
                 with st.spinner("Ustaad Jee is thinking..."):
                     try:
-                        response = retrieve_and_generate(
+                        response = cached_retrieve_and_generate(
                             query=chat_query,
-                            context_text=context_text
+                            context_text=context_text or "",
+                            index_version=st.session_state.index_version
                         )
                         chat_entry = {
                             "query": chat_query,

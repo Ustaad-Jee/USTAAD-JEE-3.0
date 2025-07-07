@@ -1,11 +1,12 @@
+#rag_utils
 import streamlit as st
-import pymupdf4llm
+import fitz  # PyMuPDF
 import bleach
 import time
 from apconfig import AppConfig
-from typing import List, Optional
+from typing import List, Optional, Tuple
 from qdrant_client import QdrantClient
-from qdrant_client.models import Distance, VectorParams
+from qdrant_client.models import Distance, VectorParams, PointStruct
 from langchain_qdrant import QdrantVectorStore
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_huggingface import HuggingFaceEmbeddings
@@ -16,17 +17,19 @@ from llama_index.core.retrievers import AutoMergingRetriever
 from llama_index.core.query_engine import RetrieverQueryEngine
 from llama_index.vector_stores.qdrant import QdrantVectorStore as LlamaQdrantVectorStore
 from llm_utils import CustomLLM
-import traceback
 
-COLLECTION_NAME = "ustaad-jee-textbooks"
+
+# Collection names
+BASE_COLLECTION = "ustaad-jee-base"
+SENTENCE_WINDOW_COLLECTION = "ustaad-jee-sentence-window"
+AUTOMERGING_COLLECTION = "ustaad-jee-automerging"
+
 
 def initialize_qdrant() -> bool:
-    """Initialize Qdrant client"""
+    """Initialize Qdrant client and required collections"""
     try:
         api_key = st.secrets.get("QDRANT_API_KEY")
         url = st.secrets.get("QDRANT_URL")
-        print(f"Qdrant API Key: {api_key[:5]}..." if api_key else "No API key found")  # Debug
-        print(f"Qdrant URL: {url}")  # Debug
         if not api_key or not url:
             st.error("Qdrant API key or URL not found in secrets")
             return False
@@ -34,488 +37,383 @@ def initialize_qdrant() -> bool:
         client = QdrantClient(url=url, api_key=api_key)
         st.session_state["qdrant_client"] = client
 
+        # Create required collections if they don't exist
         collections = client.get_collections()
-        collection_names = [c.name for c in collections.collections]
-        print(f"Qdrant collections: {collection_names}")  # Debug
+        existing_collections = [c.name for c in collections.collections]
 
-        if COLLECTION_NAME not in collection_names:
-            print(f"Creating Qdrant collection: {COLLECTION_NAME}")  # Debug
-            client.create_collection(
-                collection_name=COLLECTION_NAME,
-                vectors_config=VectorParams(size=384, distance=Distance.COSINE)
-            )
+        for collection_name in [BASE_COLLECTION, SENTENCE_WINDOW_COLLECTION, AUTOMERGING_COLLECTION]:
+            if collection_name not in existing_collections:
+                client.create_collection(
+                    collection_name=collection_name,
+                    vectors_config=VectorParams(size=384, distance=Distance.COSINE)
+                )
+                print(f"Created collection: {collection_name}")
+                time.sleep(1)  # Brief pause between creations
 
-        print("Qdrant initialized successfully")  # Debug
         return True
     except Exception as e:
         st.error(f"Qdrant initialization failed: {str(e)}")
-        print(f"Qdrant error details: {str(e)}")  # Debug
         return False
+
 
 def initialize_embeddings() -> bool:
     """Initialize HuggingFace embeddings"""
     try:
-        print("Initializing embeddings")  # Debug
         embeddings = HuggingFaceEmbeddings(
             model_name="sentence-transformers/all-MiniLM-L6-v2",
             model_kwargs={'device': 'cpu'},
             encode_kwargs={'normalize_embeddings': True}
         )
         st.session_state["embeddings"] = embeddings
-        st.session_state["embedding_provider"] = "HuggingFace"
-        print(f"Embeddings initialized: {type(embeddings)}")  # Debug
+        Settings.embed_model = embeddings
         return True
     except Exception as e:
         st.error(f"Embeddings initialization failed: {str(e)}")
-        print(f"Embeddings error details: {str(e)}")  # Debug
         return False
+
 
 def initialize_llm() -> bool:
     """Initialize LLM for LlamaIndex"""
     try:
         if "llm" in st.session_state and st.session_state["llm"]:
             Settings.llm = CustomLLM(st.session_state["llm"])
-            print(f"LLM initialized: {type(Settings.llm)}")  # Debug
             return True
-        else:
-            st.error("LLM not initialized in session state. Please configure Ustaad Jee's brain first.")
-            print("LLM initialization failed: No LLM in session state")  # Debug
-            return False
+        st.error("LLM not initialized. Configure Ustaad Jee's brain first.")
+        return False
     except Exception as e:
         st.error(f"LLM initialization failed: {str(e)}")
-        print(f"LLM error details: {str(e)}")  # Debug
         return False
+
 
 def initialize_components():
     """Initialize all components for RAG functionality"""
     try:
-        print("Starting initialize_components")  # Debug
-
         if not initialize_qdrant():
-            st.error("Qdrant initialization failed, stopping execution.")
-            print("Failed: Qdrant initialization")  # Debug
             return False
-
         if not initialize_embeddings():
-            st.error("Embeddings initialization failed, stopping execution.")
-            print("Failed: Embeddings initialization")  # Debug
             return False
-
         if not initialize_llm():
-            st.error("LLM initialization failed, stopping execution.")
-            print("Failed: LLM initialization")  # Debug
             return False
-
-        Settings.embed_model = st.session_state["embeddings"]
-        print(f"Settings.llm: {type(Settings.llm)}")  # Debug
-        print(f"Settings.embed_model: {type(Settings.embed_model)}")  # Debug
-        print(f"Session state after initialization: {list(st.session_state.keys())}")  # Debug
         return True
     except Exception as e:
         st.error(f"Component initialization failed: {str(e)}")
-        print(f"Component initialization error: {str(e)}")  # Debug
         return False
 
-def check_existing_vectorstore() -> bool:
-    """Check if vectorstore already exists and is accessible"""
-    try:
-        if "qdrant_client" not in st.session_state:
-            print("No Qdrant client in session state")  # Debug
-            return False
-
-        client = st.session_state["qdrant_client"]
-        collections = client.get_collections()
-        collection_names = [c.name for c in collections.collections]
-        print(f"Qdrant collections: {collection_names}")  # Debug
-        if COLLECTION_NAME not in collection_names:
-            print(f"Collection {COLLECTION_NAME} not found")  # Debug
-            return False
-
-        collection_info = client.get_collection(COLLECTION_NAME)
-        if collection_info.points_count > 0:
-            vectorstore = QdrantVectorStore(
-                client=client,
-                collection_name=COLLECTION_NAME,
-                embedding=st.session_state["embeddings"]
-            )
-            st.session_state["vectorstore"] = vectorstore
-            st.session_state["documents_indexed"] = True
-            print(f"Existing vectorstore found with {collection_info.points_count} vectors")
-            return True
-
-        print(f"Collection {COLLECTION_NAME} exists but has no vectors")  # Debug
-        return False
-    except Exception as e:
-        st.error(f"Error checking existing vectorstore: {str(e)}")
-        print(f"Vectorstore check error: {str(e)}")  # Debug
-        return False
 
 def parse_document(document: any) -> List[str]:
     """Parse document into text chunks"""
     try:
-        print(f"Parsing document: {type(document)}")  # Debug
         if isinstance(document, str):
             text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
-            chunks = text_splitter.split_text(document)
-            print(f"Parsed string into {len(chunks)} chunks")  # Debug
-            return chunks
-        elif hasattr(document, 'read'):
+            return text_splitter.split_text(document)
+
+        if hasattr(document, 'read'):
+            # Handle PDF files
             if document.name.endswith(".pdf"):
-                try:
-                    content = document.read()
-                    document.seek(0)
-                    text = pymupdf4llm.to_markdown(content)
-                    cleaned_text = bleach.clean(text, tags=["p", "b", "i", "strong", "em"], strip=True)
-                    text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
-                    chunks = text_splitter.split_text(cleaned_text)
-                    print(f"Parsed PDF into {len(chunks)} chunks using pymupdf4llm")  # Debug
-                    return chunks
-                except Exception as e:
-                    print(f"pymupdf4llm failed: {str(e)}, falling back to pymupdf")  # Debug
-                    import pymupdf
-                    document.seek(0)
-                    doc = pymupdf.open(stream=document.read(), filetype="pdf")
+                with fitz.open(stream=document.read(), filetype="pdf") as doc:
                     text = ""
                     for page in doc:
-                        text += page.get_text("text")
+                        text += page.get_text()
                     cleaned_text = bleach.clean(text, tags=["p", "b", "i", "strong", "em"], strip=True)
                     text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
-                    chunks = text_splitter.split_text(cleaned_text)
-                    print(f"Parsed PDF into {len(chunks)} chunks using pymupdf")  # Debug
-                    doc.close()
-                    return chunks
+                    return text_splitter.split_text(cleaned_text)
+
+            # Handle text files
             elif document.name.endswith(".txt"):
                 text = document.read().decode("utf-8")
                 cleaned_text = bleach.clean(text, tags=["p", "b", "i", "strong", "em"], strip=True)
                 text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
-                chunks = text_splitter.split_text(cleaned_text)
-                print(f"Parsed TXT into {len(chunks)} chunks")  # Debug
-                return chunks
-            else:
-                raise ValueError("Unsupported file type. Use .txt or .pdf.")
-        else:
-            raise Exception(f"Invalid document type: {type(document)}")
+                return text_splitter.split_text(cleaned_text)
+
+        raise ValueError("Unsupported document type")
     except Exception as e:
         st.error(f"Error parsing document: {str(e)}")
-        print(f"Parse document error: {str(e)}")  # Debug
-        raise Exception(f"Error parsing document: {str(e)}")
+        raise
 
-def create_qdrant_vectorstore(text_chunks: List[str]) -> tuple:
-    """Create or update Qdrant vectorstore with text chunks"""
+
+def store_base_chunks(text_chunks: List[str]):
+    """Store base text chunks in Qdrant"""
     try:
-        print("Starting create_qdrant_vectorstore")  # Debug
-        if "qdrant_client" not in st.session_state:
-            raise ValueError("Qdrant client not initialized")
-
         client = st.session_state["qdrant_client"]
-        collections = client.get_collections()
-        collection_names = [c.name for c in collections.collections]
-        print(f"Existing Qdrant collections: {collection_names}")  # Debug
+        embeddings = st.session_state["embeddings"]
 
-        if COLLECTION_NAME not in collection_names:
-            st.info(f"Creating new Qdrant collection '{COLLECTION_NAME}' with dimension 384...")
-            print(f"Creating Qdrant collection: {COLLECTION_NAME}")  # Debug
-            client.create_collection(
-                collection_name=COLLECTION_NAME,
-                vectors_config=VectorParams(size=384, distance=Distance.COSINE)
+        # Generate embeddings in batch
+        vectors = [embeddings.embed_query(chunk) for chunk in text_chunks]
+
+        # Prepare points for upsert
+        points = [
+            PointStruct(
+                id=idx,
+                vector=vector,
+                payload={"text": text}
             )
-            time.sleep(5)
-            st.success(f"Collection '{COLLECTION_NAME}' created successfully!")
+            for idx, (text, vector) in enumerate(zip(text_chunks, vectors))
+        ]
 
-        print(f"Text chunks to add: {len(text_chunks)}")  # Debug
-        if text_chunks:
-            print(f"Sample chunk: {text_chunks[0][:100]}...")  # Debug
-
-        langchain_vectorstore = QdrantVectorStore(
-            client=client,
-            collection_name=COLLECTION_NAME,
-            embedding=st.session_state["embeddings"]
+        # Upsert to Qdrant
+        client.upsert(
+            collection_name=BASE_COLLECTION,
+            points=points,
+            wait=True
         )
 
-        llamaindex_vectorstore = LlamaQdrantVectorStore(
-            client=client,
-            collection_name=COLLECTION_NAME
-        )
-
-        if text_chunks:
-            print("Adding text chunks to vectorstore")  # Debug
-            langchain_vectorstore.add_texts(texts=text_chunks)
-            print("Upsert complete, vectorstore updated")  # Debug
-
-        return langchain_vectorstore, llamaindex_vectorstore
+        print(f"Stored {len(points)} base chunks in Qdrant")
+        return True
     except Exception as e:
-        st.error(f"Error creating Qdrant vector store: {str(e)}")
-        print(f"Vectorstore creation error: {str(e)}\n{traceback.format_exc()}")  # Debug
-        raise Exception(f"Error creating Qdrant vector store: {str(e)}")
+        st.error(f"Error storing base chunks: {str(e)}")
+        return False
+
 
 def build_sentence_window_index(document_text: str) -> VectorStoreIndex:
     """Build sentence window index for advanced RAG"""
     try:
-        print("Starting build_sentence_window_index")  # Debug
-        if not st.session_state.get("embeddings"):
-            raise Exception("Embeddings not initialized")
+        client = st.session_state["qdrant_client"]
+        embeddings = st.session_state["embeddings"]
 
-        if not document_text.strip():
-            raise Exception("Document text is empty")
+        # Create vector store
+        vector_store = LlamaQdrantVectorStore(
+            client=client,
+            collection_name=SENTENCE_WINDOW_COLLECTION
+        )
 
-        print(f"Document text length: {len(document_text)}")  # Debug
-
+        # Configure node parser
         node_parser = SentenceWindowNodeParser.from_defaults(
             window_size=3,
             window_metadata_key="window",
             original_text_metadata_key="original_text"
         )
 
+        # Process document
         document = Document(text=document_text)
-        print("Parsing nodes")  # Debug
         nodes = node_parser.get_nodes_from_documents([document])
-        print(f"Sentence window nodes created: {len(nodes)}")  # Debug
 
-        if not nodes:
-            raise Exception("No nodes created for sentence window index")
-
-        storage_context = StorageContext.from_defaults()
+        # Create index
+        storage_context = StorageContext.from_defaults(vector_store=vector_store)
         index = VectorStoreIndex(
             nodes,
             storage_context=storage_context,
-            embed_model=st.session_state["embeddings"]
+            embed_model=embeddings
         )
-        print("Sentence window index created")  # Debug
+
         return index
     except Exception as e:
         st.error(f"Error building sentence window index: {str(e)}")
-        print(f"Sentence window index error: {str(e)}\n{traceback.format_exc()}")  # Debug
-        raise Exception(f"Error building sentence window index: {str(e)}")
+        raise
+
 
 def build_automerging_index(document_text: str) -> VectorStoreIndex:
     """Build auto-merging index for advanced RAG"""
     try:
-        print("Starting build_automerging_index")  # Debug
-        if not st.session_state.get("embeddings"):
-            raise Exception("Embeddings not initialized")
+        client = st.session_state["qdrant_client"]
+        embeddings = st.session_state["embeddings"]
 
-        if not document_text.strip():
-            raise Exception("Document text is empty")
+        # Create vector store
+        vector_store = LlamaQdrantVectorStore(
+            client=client,
+            collection_name=AUTOMERGING_COLLECTION
+        )
 
-        node_parser = HierarchicalNodeParser.from_defaults(chunk_sizes=[2048, 512, 128])
+        # Configure node parser
+        node_parser = HierarchicalNodeParser.from_defaults(
+            chunk_sizes=[2048, 512, 128]
+        )
+
+        # Process document
         document = Document(text=document_text)
-
-        print("Parsing nodes")  # Debug
         nodes = node_parser.get_nodes_from_documents([document])
         leaf_nodes = get_leaf_nodes(nodes)
-        print(f"Auto-merging leaf nodes created: {len(leaf_nodes)}")  # Debug
 
-        if not leaf_nodes:
-            raise Exception("No leaf nodes created for auto-merging index")
-
-        llamaindex_vectorstore = st.session_state.get("llamaindex_vectorstore")
-        if not llamaindex_vectorstore:
-            raise Exception("LlamaIndex vectorstore not initialized")
-
-        storage_context = StorageContext.from_defaults(vector_store=llamaindex_vectorstore)
+        # Create index
+        storage_context = StorageContext.from_defaults(vector_store=vector_store)
         index = VectorStoreIndex(
             leaf_nodes,
             storage_context=storage_context,
-            embed_model=st.session_state["embeddings"]
+            embed_model=embeddings
         )
-        print("Auto-merging index created")  # Debug
+
         return index
     except Exception as e:
         st.error(f"Error building auto-merging index: {str(e)}")
-        print(f"Auto-merging index error: {str(e)}\n{traceback.format_exc()}")  # Debug
-        raise Exception(f"Error building auto-merging index: {str(e)}")
+        raise
+
 
 def index_document(text_or_file: any) -> bool:
     """Index document with full RAG pipeline"""
     try:
-        print(f"Starting index_document with input type: {type(text_or_file)}")  # Debug
-
         if not initialize_components():
-            st.error("Failed to initialize RAG components")
             return False
 
         text_chunks = parse_document(text_or_file)
-        print(f"Number of text chunks: {len(text_chunks)}")  # Debug
-
         if not text_chunks:
             st.error("No text chunks created from document.")
             return False
 
-        document_text = "\n".join(text_chunks)
-        print(f"Document text length: {len(document_text)}")  # Debug
-
-        if not document_text.strip():
-            st.error("Document text is empty after processing.")
+        # Store base chunks
+        if not store_base_chunks(text_chunks):
             return False
 
-        print("Creating Qdrant vectorstore")  # Debug
-        langchain_vectorstore, llamaindex_vectorstore = create_qdrant_vectorstore(text_chunks)
-        st.session_state["vectorstore"] = langchain_vectorstore
-        st.session_state["llamaindex_vectorstore"] = llamaindex_vectorstore
-
-        print("Building sentence window index")  # Debug
-        sentence_window_index = build_sentence_window_index(document_text)
-
-        print("Building auto-merging index")  # Debug
-        automerging_index = build_automerging_index(document_text)
-
-        st.session_state["sentence_window_index"] = sentence_window_index
-        st.session_state["automerging_index"] = automerging_index
+        # Build advanced indexes
+        document_text = "\n".join(text_chunks)
+        st.session_state["sentence_window_index"] = build_sentence_window_index(document_text)
+        st.session_state["automerging_index"] = build_automerging_index(document_text)
         st.session_state["document_text"] = document_text
         st.session_state["documents_indexed"] = True
 
-        print("Document indexed successfully")  # Debug
         return True
     except Exception as e:
         st.error(f"Error indexing document: {str(e)}")
-        print(f"Indexing error details: {str(e)}\n{traceback.format_exc()}")  # Debug
         return False
 
+
 def clear_indexes():
-    """Clear all indexes and vectorstore"""
+    """Clear all indexes and vectorstores"""
     try:
-        print("Starting clear_indexes")  # Debug
         client = st.session_state.get("qdrant_client")
         if client:
-            collections = client.get_collections()
-            if COLLECTION_NAME in [c.name for c in collections.collections]:
-                client.delete_collection(COLLECTION_NAME)
-                print(f"Qdrant collection {COLLECTION_NAME} deleted")  # Debug
+            for collection in [BASE_COLLECTION, SENTENCE_WINDOW_COLLECTION, AUTOMERGING_COLLECTION]:
+                try:
+                    client.delete_collection(collection)
+                    print(f"Deleted collection: {collection}")
+                except Exception as e:
+                    print(f"Error deleting {collection}: {str(e)}")
 
-        keys_to_clear = [
-            "sentence_window_index",
-            "automerging_index",
-            "vectorstore",
-            "llamaindex_vectorstore",
-            "document_text",
-            "documents_indexed"
-        ]
-        for key in keys_to_clear:
-            st.session_state.pop(key, None)
+        # Clear session state
+        for key in ["sentence_window_index", "automerging_index", "document_text", "documents_indexed"]:
+            if key in st.session_state:
+                del st.session_state[key]
 
-        print("Indexes cleared successfully")  # Debug
+        # Clear relevant caches
+        st.cache_data.clear()  # Clear all cached data functions
     except Exception as e:
         st.error(f"Error clearing indexes: {str(e)}")
-        print(f"Clear indexes error: {str(e)}")  # Debug
+
 
 def has_indexed_documents() -> bool:
-    """Check if there are indexed documents available"""
+    """Check if documents are indexed"""
     try:
         if st.session_state.get("documents_indexed"):
             return True
 
-        if (st.session_state.get("sentence_window_index") and
-                st.session_state.get("automerging_index")):
-            return True
-
-        if "qdrant_client" in st.session_state:
-            client = st.session_state["qdrant_client"]
-            collections = client.get_collections()
-            if COLLECTION_NAME in [c.name for c in collections.collections]:
-                collection_info = client.get_collection(COLLECTION_NAME)
-                if collection_info.points_count > 0:
-                    st.session_state["documents_indexed"] = True
-                    return True
+        client = st.session_state.get("qdrant_client")
+        if client:
+            collection_info = client.get_collection(BASE_COLLECTION)
+            return collection_info.points_count > 0
 
         return False
-    except Exception as e:
-        print(f"Error checking indexed documents: {str(e)}")
+    except:
         return False
 
-def retrieve_and_generate(query: str, context_text: Optional[str] = None) -> str:
-    """Retrieve and generate response using RAG pipeline"""
+
+def retrieve_relevant_chunks(query: str, top_k: int = 5) -> Tuple[List[str], float]:
+    """Retrieve relevant chunks from Qdrant with confidence score"""
     try:
-        print(f"Starting retrieve_and_generate with query: {query[:50]}...")  # Debug
+        if "qdrant_client" not in st.session_state:
+            return [], 0.0
 
-        if not isinstance(Settings.llm, CustomLLM):
-            if "llm" in st.session_state:
-                Settings.llm = CustomLLM(st.session_state["llm"])
-            else:
-                return "LLM not properly initialized. Please configure the brain first."
+        client = st.session_state["qdrant_client"]
+        embeddings = st.session_state["embeddings"]
 
-        if not st.session_state.get("sentence_window_index") or not st.session_state.get("automerging_index"):
-            print("No advanced indexes found, using basic document chat")  # Debug
+        # Generate query embedding
+        query_embedding = embeddings.embed_query(query)
+
+        # Search Qdrant
+        results = client.search(
+            collection_name=BASE_COLLECTION,
+            query_vector=query_embedding,
+            limit=top_k,
+            with_payload=True,
+            with_vectors=False
+        )
+
+        if not results:
+            return [], 0.0
+
+        # Extract text and scores
+        chunks = [result.payload["text"] for result in results]
+        scores = [result.score for result in results]
+
+        # Calculate average confidence
+        avg_confidence = sum(scores) / len(scores) if scores else 0.0
+
+        return chunks, avg_confidence
+    except Exception as e:
+        print(f"Retrieval error: {str(e)}")
+        return [], 0.0
+
+
+def generate_response(query: str, context_text: Optional[str] = None) -> str:
+    try:
+        # Retrieve relevant chunks from Qdrant
+        relevant_chunks, confidence = retrieve_relevant_chunks(query)
+        rag_context = "\n\n".join(relevant_chunks) if relevant_chunks else ""
+
+        # Prepare context
+        full_context = ""
+        if rag_context:
+            full_context += f"Relevant Information:\n{rag_context}\n\n"
+        else:
+            # Fallback to st.session_state.uploaded_document if available
             document_text = st.session_state.get("uploaded_document", "")
-            if not document_text and not context_text:
-                return "No document or context provided. Please upload a document or provide context."
-
             if document_text:
-                response = st.session_state["llm"].document_chat(
-                    document_text=document_text,
-                    question=query,
-                    language=st.session_state.get("chat_language", "English"),
-                    glossary=st.session_state.get("glossary")
-                )
-            else:
-                prompt = AppConfig.ENGLISH_CHAT_PROMPT.format(
-                    glossary_section="",
-                    document_text=context_text or "",
-                    question=query
-                )
-                response = st.session_state["llm"].generate(prompt, temperature=0.3)
-
-            return response
-
-        sentence_index = st.session_state["sentence_window_index"]
-        auto_merging_index = st.session_state["automerging_index"]
-
-        print("Creating retrievers")  # Debug
-        sw_retriever = sentence_index.as_retriever(similarity_top_k=6)
-        am_retriever = AutoMergingRetriever(
-            auto_merging_index.as_retriever(similarity_top_k=12),
-            storage_context=auto_merging_index.storage_context,
-            verbose=True
-        )
-
-        print("Creating reranker")  # Debug
-        reranker = SentenceTransformerRerank(
-            model="cross-encoder/ms-marco-MiniLM-L-6-v2",
-            top_n=4
-        )
-
-        print("Creating query engines")  # Debug
-        sw_query_engine = RetrieverQueryEngine.from_args(
-            retriever=sw_retriever,
-            node_postprocessors=[
-                MetadataReplacementPostProcessor(target_metadata_key="window"),
-                reranker
-            ],
-            llm=Settings.llm
-        )
-        am_query_engine = RetrieverQueryEngine.from_args(
-            retriever=am_retriever,
-            node_postprocessors=[reranker],
-            llm=Settings.llm
-        )
-
-        print("Executing queries")  # Debug
-        sw_response = str(sw_query_engine.query(query))
-        am_response = str(am_query_engine.query(query))
-
-        final_response = f"{sw_response}\n\nAdditional Insights:\n{am_response}"
+                full_context += f"Document Content:\n{document_text}\n\n"
         if context_text:
-            final_response += f"\n\nContext Provided:\n{context_text}"
+            full_context += f"Additional Context:\n{context_text}\n\n"
 
+        # Prepare glossary section
+        glossary = st.session_state.get("glossary", {})
+        glossary_section = ""
+        if isinstance(glossary, dict) and glossary:
+            try:
+                # Filter valid string key-value pairs
+                valid_glossary = {
+                    str(eng): str(urdu)
+                    for eng, urdu in glossary.items()
+                    if isinstance(eng, str) and isinstance(urdu, str) and eng.strip() and urdu.strip()
+                }
+                if valid_glossary:
+                    glossary_section = "\n".join(f"{eng}: {urdu}" for eng, urdu in valid_glossary.items()) + "\n"
+            except Exception as e:
+                print(f"Glossary formatting error: {str(e)}, Glossary content: {glossary}")
+                glossary_section = ""  # Fallback to empty string on error
+        # Debug: Log glossary content
+        print(f"Glossary: {glossary}, Formatted glossary_section: {glossary_section!r}")
+
+        # Select and format prompt
+        if full_context:
+            prompt = AppConfig.RAG_PROMPT.format(
+                glossary_section=glossary_section,
+                context=full_context,
+                question=query
+            )
+        else:
+            prompt = AppConfig.DIRECT_PROMPT.format(
+                glossary_section=glossary_section,
+                question=query
+            )
+
+        # Generate response
+        response = st.session_state["llm"].generate(
+            prompt=prompt,
+            temperature=0.3
+        )
+
+        # Handle language translation if needed
         chat_language = st.session_state.get("chat_language", "English")
         if chat_language == "Urdu":
-            final_response = st.session_state["llm"].translate_to_urdu(final_response)
+            response = st.session_state["llm"].translate_to_urdu(response)
         elif chat_language == "Roman Urdu":
-            final_response = st.session_state["llm"].translate_to_roman_urdu(final_response)
+            response = st.session_state["llm"].translate_to_roman_urdu(response)
 
-        return final_response
+        return response
     except Exception as e:
-        st.error(f"Error in retrieve_and_generate: {str(e)}")
-        print(f"Retrieve and generate error: {str(e)}")  # Debug
-        return f"Error: {str(e)}"
+        return f"Error generating response: {str(e)}"
 
+
+# Auto-initialize RAG system
 if "rag_initialized" not in st.session_state:
     if initialize_components():
-        if check_existing_vectorstore():
-            st.session_state["rag_initialized"] = True
-            print("RAG system auto-initialized with existing vectorstore")
-        else:
-            st.session_state["rag_initialized"] = "partial"
-            print("RAG components initialized, no existing vectorstore found")
+        st.session_state["rag_initialized"] = True
+        print("RAG system initialized successfully")
     else:
         st.session_state["rag_initialized"] = False
         print("RAG initialization failed")
