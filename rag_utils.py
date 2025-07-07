@@ -14,7 +14,7 @@ from llama_index.core.postprocessor import MetadataReplacementPostProcessor, Sen
 from llama_index.core import Document, VectorStoreIndex, StorageContext, Settings
 from llama_index.core.retrievers import AutoMergingRetriever
 from llama_index.core.query_engine import RetrieverQueryEngine
-from llama_index_vector_stores_qdrant import QdrantVectorStore as LlamaQdrantVectorStore
+from llama_index.vector_stores.qdrant import QdrantVectorStore as LlamaQdrantVectorStore
 from llm_utils import CustomLLM
 import traceback
 
@@ -34,7 +34,6 @@ def initialize_qdrant() -> bool:
         client = QdrantClient(url=url, api_key=api_key)
         st.session_state["qdrant_client"] = client
 
-        # Check if collection exists
         collections = client.get_collections()
         collection_names = [c.name for c in collections.collections]
         print(f"Qdrant collections: {collection_names}")  # Debug
@@ -92,31 +91,25 @@ def initialize_components():
     try:
         print("Starting initialize_components")  # Debug
 
-        # Initialize Qdrant
         if not initialize_qdrant():
             st.error("Qdrant initialization failed, stopping execution.")
             print("Failed: Qdrant initialization")  # Debug
             return False
 
-        # Initialize Embeddings
         if not initialize_embeddings():
             st.error("Embeddings initialization failed, stopping execution.")
             print("Failed: Embeddings initialization")  # Debug
             return False
 
-        # Initialize LLM
         if not initialize_llm():
             st.error("LLM initialization failed, stopping execution.")
             print("Failed: LLM initialization")  # Debug
             return False
 
-        # Set global settings
         Settings.embed_model = st.session_state["embeddings"]
-
         print(f"Settings.llm: {type(Settings.llm)}")  # Debug
         print(f"Settings.embed_model: {type(Settings.embed_model)}")  # Debug
         print(f"Session state after initialization: {list(st.session_state.keys())}")  # Debug
-
         return True
     except Exception as e:
         st.error(f"Component initialization failed: {str(e)}")
@@ -127,18 +120,19 @@ def check_existing_vectorstore() -> bool:
     """Check if vectorstore already exists and is accessible"""
     try:
         if "qdrant_client" not in st.session_state:
+            print("No Qdrant client in session state")  # Debug
             return False
 
         client = st.session_state["qdrant_client"]
         collections = client.get_collections()
         collection_names = [c.name for c in collections.collections]
+        print(f"Qdrant collections: {collection_names}")  # Debug
         if COLLECTION_NAME not in collection_names:
+            print(f"Collection {COLLECTION_NAME} not found")  # Debug
             return False
 
-        # Check if collection has vectors
         collection_info = client.get_collection(COLLECTION_NAME)
         if collection_info.points_count > 0:
-            # Create LangChain vectorstore
             vectorstore = QdrantVectorStore(
                 client=client,
                 collection_name=COLLECTION_NAME,
@@ -149,9 +143,11 @@ def check_existing_vectorstore() -> bool:
             print(f"Existing vectorstore found with {collection_info.points_count} vectors")
             return True
 
+        print(f"Collection {COLLECTION_NAME} exists but has no vectors")  # Debug
         return False
     except Exception as e:
-        print(f"Error checking existing vectorstore: {str(e)}")
+        st.error(f"Error checking existing vectorstore: {str(e)}")
+        print(f"Vectorstore check error: {str(e)}")  # Debug
         return False
 
 def parse_document(document: any) -> List[str]:
@@ -230,20 +226,17 @@ def create_qdrant_vectorstore(text_chunks: List[str]) -> tuple:
         if text_chunks:
             print(f"Sample chunk: {text_chunks[0][:100]}...")  # Debug
 
-        # Create LangChain vectorstore
         langchain_vectorstore = QdrantVectorStore(
             client=client,
             collection_name=COLLECTION_NAME,
             embedding=st.session_state["embeddings"]
         )
 
-        # Create LlamaIndex vectorstore
         llamaindex_vectorstore = LlamaQdrantVectorStore(
             client=client,
             collection_name=COLLECTION_NAME
         )
 
-        # Add text chunks if provided
         if text_chunks:
             print("Adding text chunks to vectorstore")  # Debug
             langchain_vectorstore.add_texts(texts=text_chunks)
@@ -515,7 +508,6 @@ def retrieve_and_generate(query: str, context_text: Optional[str] = None) -> str
         print(f"Retrieve and generate error: {str(e)}")  # Debug
         return f"Error: {str(e)}"
 
-# Auto-initialize on import if not already done
 if "rag_initialized" not in st.session_state:
     if initialize_components():
         if check_existing_vectorstore():

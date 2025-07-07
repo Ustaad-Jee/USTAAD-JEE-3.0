@@ -270,14 +270,11 @@ class LLMWrapper:
 class CustomLLM(BaseLLM):
     def __init__(self, llm_wrapper: LLMWrapper, callback_manager: Optional[CallbackManager] = None):
         super().__init__(callback_manager=callback_manager)
-        # Verify llm_wrapper has a generate method
         if not hasattr(llm_wrapper, 'generate'):
             raise ValueError(f"llm_wrapper must have a 'generate' method, got {type(llm_wrapper)}")
-
-        # Store all custom attributes as private to avoid Pydantic field validation
         self._llm_wrapper = llm_wrapper
-        self._call_count = 0  # Track calls to detect potential recursion
-        print(f"CustomLLM initialized with llm_wrapper: {type(self._llm_wrapper)}")  # Debug
+        self._call_count = 0
+        print(f"CustomLLM initialized with llm_wrapper: {type(self._llm_wrapper)}")
 
     @property
     def metadata(self) -> LLMMetadata:
@@ -290,13 +287,19 @@ class CustomLLM(BaseLLM):
 
     def complete(self, prompt: str, **kwargs) -> CompletionResponse:
         self._call_count += 1
-        if self._call_count > 10:  # Prevent infinite recursion
+        if self._call_count > 10:
             raise Exception(f"Possible recursive call detected in CustomLLM.complete (count: {self._call_count})")
 
-        print(f"CustomLLM.complete called (count: {self._call_count}) with prompt: {prompt[:50]}...")  # Debug
+        if not isinstance(prompt, str) or not prompt.strip():
+            print(f"Invalid prompt in CustomLLM.complete: {prompt}")
+            return CompletionResponse(text="Error: Invalid or empty prompt provided.")
 
+        print(f"CustomLLM.complete called (count: {self._call_count}) with prompt: {prompt[:50]}...")
         try:
             response_text = self._llm_wrapper.generate(prompt, **kwargs)
+            if not isinstance(response_text, str) or not response_text.strip():
+                print(f"Invalid response from llm_wrapper: {response_text}")
+                return CompletionResponse(text="Error: LLM returned an invalid or empty response.")
             return CompletionResponse(text=response_text)
         except Exception as e:
             print(f"Error in CustomLLM.complete: {str(e)}")
@@ -312,15 +315,28 @@ class CustomLLM(BaseLLM):
         if self._call_count > 10:
             raise Exception(f"Possible recursive call detected in CustomLLM.chat (count: {self._call_count})")
 
-        print(f"CustomLLM.chat called (count: {self._call_count}) with {len(messages)} messages")  # Debug
+        if not messages:
+            print("Empty messages list in CustomLLM.chat")
+            return "Error: No messages provided."
 
-        # Convert messages to a single prompt
+        print(f"CustomLLM.chat called (count: {self._call_count}) with {len(messages)} messages")
         prompt = ""
         for msg in messages:
             if isinstance(msg, dict):
                 content = msg.get("content", "")
             else:
                 content = str(msg)
+            if not isinstance(content, str) or not content.strip():
+                print(f"Invalid message content: {content}")
+                return "Error: Invalid or empty message content."
             prompt += content + "\n"
 
-        return self._llm_wrapper.generate(prompt.strip(), **kwargs)
+        try:
+            response_text = self._llm_wrapper.generate(prompt.strip(), **kwargs)
+            if not isinstance(response_text, str) or not response_text.strip():
+                print(f"Invalid response from llm_wrapper: {response_text}")
+                return "Error: LLM returned an invalid or empty response."
+            return response_text
+        except Exception as e:
+            print(f"Error in CustomLLM.chat: {str(e)}")
+            return f"Error: {str(e)}"

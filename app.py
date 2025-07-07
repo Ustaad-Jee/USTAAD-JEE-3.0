@@ -1,5 +1,13 @@
 #app.py
 import streamlit as st
+#it keeps giving me a weird error and this was how i solved it dont question it bro
+st.set_page_config(
+    page_title="Ustaad Jee's Knowledge Hub",
+    page_icon="dude.png",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
 import openai
 import requests
 import json
@@ -800,14 +808,14 @@ def create_admin_interface():
 
     with tab2:
         st.markdown("#### Document Management")
-        st.info("📈 Documents are processed with Sentence Window, Auto-merging, and Pinecone hosted embeddings.")
-        document_text, context_text = create_admin_input_interface()  # Use admin-specific input interface
+        st.info("📈 Documents are processed with Sentence Window, Auto-merging, and Qdrant-hosted embeddings.")
+        document_text, context_text = create_admin_input_interface()
         has_documents = "sentence_window_index" in st.session_state or "automerging_index" in st.session_state
         if has_documents:
             st.success("📄 Document indexed!")
             col1, col2 = st.columns(2)
             with col1:
-                st.info("Current indexes: Sentence Window, Auto-merging, Pinecone")
+                st.info("Current indexes: Sentence Window, Auto-merging, Qdrant")
             with col2:
                 if st.button("Clear Current Indexes", key="admin_clear_indexes"):
                     try:
@@ -823,25 +831,6 @@ def create_admin_interface():
                         st.rerun()
                     except Exception as e:
                         st.error(f"❌ Error clearing indexes: {str(e)}")
-        user_query = st.text_area(
-            "Ask a question about the indexed document:",
-            placeholder="e.g., What are the main topics covered? Summarize the key points.",
-            key="admin_rag_query",
-            height=100
-        )
-        if user_query.strip() and st.button("🔍 Get Answer", key="admin_rag_submit", type="primary"):
-            try:
-                with st.spinner("🔍 Searching through the indexed document..."):
-                    response = retrieve_and_generate(user_query, context_text)
-                    st.markdown("### 💡 Answer:")
-                    st.markdown(response)
-                    log_user_activity(
-                        st.session_state.user_info['localId'],
-                        "rag_query",
-                        {"query": user_query, "response_length": len(response), "context_length": len(context_text)}
-                    )
-            except Exception as e:
-                st.error(f"❌ Error getting answer: {str(e)}")
 
     with tab3:
         st.markdown("#### Activity Logs")
@@ -957,7 +946,7 @@ def create_admin_interface():
 
 def create_admin_input_interface() -> Tuple[Optional[str], Optional[str]]:
     """
-    Create simplified interface for admin document uploads to vector database.
+    Create simplified interface for admin document uploads to Qdrant vector database.
     Only admins can upload and index documents to the vector store.
     Returns: (document_text, context_text) tuple to maintain compatibility
     """
@@ -966,13 +955,13 @@ def create_admin_input_interface() -> Tuple[Optional[str], Optional[str]]:
         return None, None
 
     st.markdown("### Document Management (Admin Only)")
-    st.markdown("Upload documents to the vector database for enhanced RAG functionality.")
+    st.markdown("Upload documents to the Qdrant vector database for enhanced RAG functionality.")
 
     # File uploader for documents
     uploaded_document = st.file_uploader(
-        "Upload Document to Vector Database",
+        "Upload Document to Qdrant Vector Database",
         type=["txt", "pdf"],
-        help="Upload a text or PDF file to be indexed in the vector database for RAG functionality.",
+        help="Upload a text or PDF file to be indexed in the Qdrant vector database for RAG functionality.",
         key="admin_document_upload"
     )
 
@@ -988,17 +977,13 @@ def create_admin_input_interface() -> Tuple[Optional[str], Optional[str]]:
                 # Store in session state for display
                 st.session_state.admin_uploaded_document = document_text
 
-                # Log user activity if available
+                # Log user activity
                 if st.session_state.get('user_info'):
-                    try:
-                        from user_management import log_user_activity  # Import here to avoid circular imports
-                        log_user_activity(
-                            st.session_state.user_info['localId'],
-                            "upload_document",
-                            {"document_length": len(document_text), "document_name": uploaded_document.name}
-                        )
-                    except ImportError:
-                        pass  # Skip logging if function not available
+                    log_user_activity(
+                        st.session_state.user_info['localId'],
+                        "upload_document",
+                        {"document_length": len(document_text), "document_name": uploaded_document.name}
+                    )
 
                 st.success(f"Document '{uploaded_document.name}' processed successfully!")
 
@@ -1021,7 +1006,7 @@ def create_admin_input_interface() -> Tuple[Optional[str], Optional[str]]:
     manual_text = st.text_area(
         "Paste Document Text",
         height=300,
-        placeholder="Paste your document text here to add to the vector database...",
+        placeholder="Paste your document text here to add to the Qdrant vector database...",
         help="Type or paste the document text for indexing.",
         key="admin_manual_text_input"
     )
@@ -1034,58 +1019,60 @@ def create_admin_input_interface() -> Tuple[Optional[str], Optional[str]]:
     final_document_text = st.session_state.get('admin_uploaded_document', '')
 
     # Index button
-    if final_document_text and st.button("Index Document to Vector Database", key="admin_index_doc_btn", type="primary"):
+    if final_document_text and st.button("Index Document to Qdrant Vector Database", key="admin_index_doc_btn", type="primary"):
         try:
-            with st.spinner("Indexing document to vector database..."):
+            with st.spinner("Indexing document to Qdrant vector database..."):
                 success = index_document(final_document_text)
                 if success:
-                    st.success("✅ Document indexed successfully to vector database!")
+                    st.success("✅ Document indexed successfully to Qdrant vector database!")
                     st.info("The document is now available for RAG-enhanced queries.")
 
                     # Log indexing activity
                     if st.session_state.get('user_info'):
-                        try:
-                            from user_management import log_user_activity
-                            log_user_activity(
-                                st.session_state.user_info['localId'],
-                                "index_document",
-                                {"document_length": len(final_document_text)}
-                            )
-                        except ImportError:
-                            pass
+                        log_user_activity(
+                            st.session_state.user_info['localId'],
+                            "index_document",
+                            {"document_length": len(final_document_text)}
+                        )
 
                     # Clear the session state
                     st.session_state.pop('admin_uploaded_document', None)
                     st.rerun()
                 else:
-                    st.error("❌ Failed to index document to vector database.")
+                    st.error("❌ Failed to index document to Qdrant vector database.")
         except Exception as e:
             st.error(f"Error during indexing: {str(e)}")
 
     # Show current vector database status
-    st.markdown("#### Vector Database Status")
+    st.markdown("#### Qdrant Vector Database Status")
     if st.session_state.get("vectorstore"):
-        st.success("✅ Vector database is active and ready for RAG queries")
+        st.success("✅ Qdrant vector database is active and ready for RAG queries")
         if st.session_state.get("sentence_window_index") and st.session_state.get("automerging_index"):
             st.info("🔍 Advanced RAG indexes are available (Sentence Window + Auto-merging)")
         else:
-            st.info("📊 Basic vector store is available")
+            st.info("📊 Basic Qdrant vector store is available")
     else:
-        st.warning("⚠️ No vector database found. Upload and index documents to enable RAG functionality.")
+        st.warning("⚠️ No Qdrant vector database found. Upload and index documents to enable RAG functionality.")
 
     # Clear indexes button
-    if st.session_state.get("vectorstore") and st.button("Clear Vector Database", key="clear_vector_db", type="secondary"):
+    if st.session_state.get("vectorstore") and st.button("Clear Qdrant Vector Database", key="clear_vector_db", type="secondary"):
         try:
-            from rag_utils import clear_indexes
             clear_indexes()
-            st.success("Vector database cleared successfully!")
+            st.session_state.admin_uploaded_document = ''
+            st.session_state.admin_context_text = ''
+            st.success("Qdrant vector database cleared successfully!")
+            log_user_activity(
+                st.session_state.user_info['localId'],
+                "clear_qdrant_indexes",
+                {"action": "cleared_qdrant_indexes"}
+            )
             st.rerun()
         except Exception as e:
-            st.error(f"Error clearing vector database: {str(e)}")
+            st.error(f"Error clearing Qdrant vector database: {str(e)}")
 
     # Return both document_text and context_text for compatibility
-    # Since this is admin-focused on vector DB, context_text can be None or same as document_text
     return final_document_text, None
+
 
 def create_llm_configuration_section():
     st.markdown("### Configure Ustaad Jee's Brain 🧠")
@@ -1316,24 +1303,24 @@ def create_glossary_section():
             st.write(f"**Total: {len(st.session_state.glossary)} terms**")
 
 
+
 def create_input_interface(admin_only: bool = False) -> Tuple[Optional[str], str]:
     """
     Create interface for uploading documents and context. All users can upload documents,
-    but only admins can index to Pinecone. Returns document text and context text.
+    but only admins can index to Qdrant. Returns document text and context text.
     """
     document_text = None
     st.markdown("### Upload Document")
-    # Use a unique key for the main interface file uploader
     uploaded_document = st.file_uploader(
         "Upload Document",
         type=["txt", "pdf"],
         help="Upload a text or PDF file for Ustaad Jee to process.",
-        key="main_document_upload"  # Unique key to avoid conflict
+        key="main_document_upload"
     )
-    document_text = st.session_state.get('uploaded_document', '')
+    document_text_str = st.session_state.get('uploaded_document', '')
     if uploaded_document:
         try:
-            document_text = parse_document(uploaded_document)  # Calls rag_utils.parse_document
+            document_text = parse_document(uploaded_document)
             document_text_str = "\n".join(document_text) if isinstance(document_text, list) else document_text
             document_text_str = bleach.clean(document_text_str, tags=[], strip=True)
             st.session_state.uploaded_document = document_text_str
@@ -1349,23 +1336,23 @@ def create_input_interface(admin_only: bool = False) -> Tuple[Optional[str], str
 
     document_text_str = st.text_area(
         "Or Paste Your Document Here",
-        value=document_text,
+        value=document_text_str,
         height=300,
         placeholder="Paste your document text here...",
         help="Type or paste the document for Ustaad Jee.",
-        key="main_document_text_input"  # Unique key
+        key="main_document_text_input"
     )
     document_text_str = bleach.clean(document_text_str.strip(), tags=[], strip=True) if document_text_str else ""
     st.session_state.uploaded_document = document_text_str
-    document_text = parse_document(document_text_str) if document_text_str else None  # Calls rag_utils.parse_document
+    document_text = parse_document(document_text_str) if document_text_str else None
 
     if document_text and st.session_state.get('is_admin', False):
-        if st.button("Index Document", key="main_index_doc_btn", type="primary"):
+        if st.button("Index Document to Qdrant Vector Database", key="main_index_doc_btn", type="primary"):
             try:
-                with st.spinner("Indexing document..."):
+                with st.spinner("Indexing document to Qdrant..."):
                     success = index_document(document_text_str)
                     if success:
-                        st.success("Document indexed successfully!")
+                        st.success("Document indexed successfully to Qdrant vector database!")
                         log_user_activity(
                             st.session_state.user_info['localId'],
                             "index_document",
@@ -1373,23 +1360,23 @@ def create_input_interface(admin_only: bool = False) -> Tuple[Optional[str], str
                         )
                         st.rerun()
                     else:
-                        st.error("Failed to index document.")
+                        st.error("Failed to index document to Qdrant vector database.")
             except Exception as e:
-                st.error(f"Error indexing: {str(e)}")
+                st.error(f"Error indexing to Qdrant: {str(e)}")
     elif document_text and not st.session_state.get('is_admin', False):
-        st.warning("Only admins can index documents to Pinecone.")
+        st.warning("Only admins can index documents to Qdrant vector database.")
 
     st.markdown("### Provide Additional Context")
     uploaded_context = st.file_uploader(
         "Upload Context (Optional)",
         type=["txt"],
         help="Upload a text file with additional context for Ustaad Jee.",
-        key="main_context_upload"  # Unique key
+        key="main_context_upload"
     )
     context_text = st.session_state.get('context_text', '')
     if uploaded_context:
         try:
-            context_text = parse_document(uploaded_context)  # Calls rag_utils.parse_document
+            context_text = parse_document(uploaded_context)
             context_text = "\n".join(context_text) if isinstance(context_text, list) else context_text
             context_text = bleach.clean(context_text, tags=[], strip=True)
             st.session_state.context_text = context_text
@@ -1409,12 +1396,13 @@ def create_input_interface(admin_only: bool = False) -> Tuple[Optional[str], str
         height=200,
         placeholder="Type or paste additional context here...",
         help="Provide extra information to guide Ustaad Jee's responses.",
-        key="main_context_text_input"  # Unique key
+        key="main_context_text_input"
     )
     context_text = bleach.clean(context_text.strip(), tags=[], strip=True) if context_text else ""
     st.session_state.context_text = context_text
 
     return document_text_str, context_text
+
 
 def create_translation_and_chat_interface(document_text: str, context_text: Optional[str] = None) -> None:
     """
@@ -1435,14 +1423,6 @@ def create_translation_and_chat_interface(document_text: str, context_text: Opti
     )
 
     # Display note about RAG usage
-    if has_indexes:
-        st.info("Using Retrieval-Augmented Generation (RAG) with indexed document, vector database, and provided context.")
-    else:
-        if not document_text and not context_text:
-            st.warning("No indexed document found. Please provide a document or context to ask questions!")
-        else:
-            st.info("No indexed document found. Answers will be based on provided document and/or context.")
-
     col1, col2, col3 = st.columns([2, 2, 1])
     with col1:
         translate_language = st.selectbox(
@@ -1697,38 +1677,6 @@ def create_translation_and_chat_interface(document_text: str, context_text: Opti
             else:
                 st.warning("Please enter a question or select a quick action!")
 
-    with st.expander("Chat Controls", expanded=False):
-        col1, col2, col3 = st.columns([1, 1, 4])
-        with col1:
-            if st.session_state.chat_history and st.button("Clear Chat", type="secondary"):
-                st.session_state.chat_history = []
-                log_user_activity(st.session_state.user_info['localId'], "clear_chat", {})
-                st.success("Chat cleared!")
-                st.rerun()
-        with col2:
-            if st.button("Reset All", type="secondary"):
-                st.session_state.chat_history = []
-                st.session_state.uploaded_document = ""
-                st.session_state.context_text = ""
-                st.session_state.results = {}
-                log_user_activity(st.session_state.user_info['localId'], "reset_all", {})
-                st.success("Ready for a new session!")
-                st.rerun()
-        with col3:
-            if st.session_state.chat_history:
-                chat_export = ""
-                for chat in st.session_state.chat_history:
-                    chat_time = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(chat.get("timestamp")))
-                    chat_export += f"[{chat_time}] Student: {chat['query']}\n"
-                    chat_export += f"[{chat_time}] Ustaad Jee ({chat['language']}): {chat['response']}\n\n"
-                st.download_button(
-                    label="Download Chat",
-                    data=chat_export,
-                    file_name=f"ustaad_jee_chat_{int(time.time())}.txt",
-                    mime="text/plain",
-                    use_container_width=True
-                )
-
 def create_usage_tips():
     with st.expander("How to Use Ustaad Jee"):
         st.markdown("""
@@ -1788,12 +1736,7 @@ def create_footer():
 
 
 def main():
-    st.set_page_config(
-        page_title="Ustaad Jee's Knowledge Hub",
-        page_icon="dude.png",
-        layout="wide",
-        initial_sidebar_state="expanded"
-    )
+
     st.markdown("""
         <style>
         @import url('https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&display=swap');
