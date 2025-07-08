@@ -236,7 +236,6 @@ def build_automerging_index(document_text: str) -> VectorStoreIndex:
         st.error(f"Error building auto-merging index: {str(e)}")
         raise
 
-
 def index_document(text_or_file: any) -> bool:
     """Index document with full RAG pipeline"""
     try:
@@ -256,7 +255,7 @@ def index_document(text_or_file: any) -> bool:
         document_text = "\n".join(text_chunks)
         st.session_state["sentence_window_index"] = build_sentence_window_index(document_text)
         st.session_state["automerging_index"] = build_automerging_index(document_text)
-        st.session_state["document_text"] = document_text
+        st.session_state["document_text"] = document_text  # Store the full document text
         st.session_state["documents_indexed"] = True
 
         return True
@@ -341,66 +340,64 @@ def retrieve_relevant_chunks(query: str, top_k: int = 5) -> Tuple[List[str], flo
         return [], 0.0
 
 
-def generate_response(query: str, context_text: Optional[str] = None) -> str:
+# rag_utils.py (updated generate_response function)
+def generate_response(query: str, context_text: Optional[str] = None, document_text: Optional[str] = None) -> str:
     try:
-        # PRIMARY: Use the user's uploaded document
-        document_text = st.session_state.get("uploaded_document", "")
-        primary_context = f"DOCUMENT CONTENT:\n{document_text}\n\n" if document_text else ""
+        # Use provided document_text if available, else fall back to session state
+        document_text = document_text if document_text is not None else st.session_state.get("document_text", "")
 
-        # SECONDARY: Retrieve relevant chunks from Qdrant
-        relevant_chunks, confidence = retrieve_relevant_chunks(query)
+        # Retrieve relevant chunks from Qdrant (only if indexed and not overridden by document_text)
+        relevant_chunks, confidence = retrieve_relevant_chunks(query) if st.session_state.get("documents_indexed",
+                                                                                              False) else ([], 0.0)
         rag_context = "\n\n".join(relevant_chunks) if relevant_chunks else ""
-        supplementary_context = f"SUPPLEMENTARY INFORMATION:\n{rag_context}\n\n" if rag_context else ""
-
-        # Combine contexts (document first, vectorstore second)
-        full_context = primary_context + supplementary_context
-
-        # Additional user-provided context
-        if context_text:
-            full_context += f"USER CONTEXT:\n{context_text}\n\n"
 
         # Prepare glossary section
         glossary = st.session_state.get("glossary", {})
-        glossary_section = ""
-        if isinstance(glossary, dict) and glossary:
-            try:
-                # Filter valid string key-value pairs
-                valid_glossary = {
-                    str(eng): str(urdu)
-                    for eng, urdu in glossary.items()
-                    if isinstance(eng, str) and isinstance(urdu, str) and eng.strip() and urdu.strip()
-                }
-                if valid_glossary:
-                    glossary_section = "\n".join(f"{eng}: {urdu}" for eng, urdu in valid_glossary.items()) + "\n"
-            except Exception as e:
-                print(f"Glossary formatting error: {str(e)}, Glossary content: {glossary}")
-                glossary_section = ""  # Fallback to empty string on error
+        glossary_section = "\n".join(f"{eng}: {urdu}" for eng, urdu in glossary.items()) + "\n" if glossary else ""
 
-        # Select and format prompt
-        if full_context:
-            prompt = AppConfig.RAG_PROMPT.format(
+        # Determine if the question is specifically about the document
+        is_about_document = any(keyword in query.lower() for keyword in [
+            "document says", "uploaded file", "key points", "main ideas", "summary of the document"
+        ]) or document_text  # Also consider it about document if document_text exists
+
+        if is_about_document:
+            # Use document-focused prompt
+            prompt = AppConfig.DOCUMENT_FOCUS_PROMPT.format(
                 glossary_section=glossary_section,
-                context=full_context,
+                document_text=document_text,
+                supplementary_info=rag_context,
                 question=query
             )
         else:
-            prompt = AppConfig.DIRECT_PROMPT.format(
-                glossary_section=glossary_section,
-                question=query
-            )
+            # Build full context
+            full_context = ""
+            if document_text:
+                full_context += f"DOCUMENT CONTENT:\n{document_text}\n\n"
+            if rag_context:
+                full_context += f"SUPPLEMENTARY INFO:\n{rag_context}\n"
+            if context_text:
+                full_context += f"USER CONTEXT:\n{context_text}\n\n"
+
+            if full_context:
+                # Use RAG prompt
+                prompt = AppConfig.RAG_PROMPT.format(
+                    glossary_section=glossary_section,
+                    document_text=document_text,
+                    supplementary_info=rag_context,
+                    question=query
+                )
+            else:
+                # Use direct prompt
+                prompt = AppConfig.DIRECT_PROMPT.format(
+                    glossary_section=glossary_section,
+                    question=query
+                )
 
         # Generate response
         response = st.session_state["llm"].generate(
             prompt=prompt,
             temperature=0.3
         )
-
-        # Handle language translation if needed
-        chat_language = st.session_state.get("chat_language", "English")
-        if chat_language == "Urdu":
-            response = st.session_state["llm"].translate_to_urdu(response)
-        elif chat_language == "Roman Urdu":
-            response = st.session_state["llm"].translate_to_roman_urdu(response)
 
         return response
     except Exception as e:

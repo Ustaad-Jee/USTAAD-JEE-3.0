@@ -75,25 +75,7 @@ if not firebase_admin._apps:
 # Get Firestore client
 db = firestore.client()
 
-class FeedbackDB:
-    def __init__(self):
-        # Initialize Firestore feedback collection (no in-memory storage needed)
-        pass
 
-    def store_feedback(self, question: str, response: str, language: str, rating: str):
-        feedback_entry = {
-            "question": bleach.clean(question),
-            "response": bleach.clean(response),
-            "language": bleach.clean(language),
-            "rating": bleach.clean(rating),
-            "timestamp": firestore.SERVER_TIMESTAMP
-        }
-        try:
-            user_id = st.session_state.user_info['localId']
-            db.collection("feedback").document(user_id).collection("entries").add(feedback_entry)
-            log_user_activity(user_id, "submit_feedback", {"rating": rating})
-        except Exception as e:
-            st.error(f"Error saving feedback: {str(e)}")
 @st.cache_data(show_spinner="Parsing document...", ttl=3600)
 def cached_parse_document(document: any) -> list:
     return parse_document(document)
@@ -1010,6 +992,29 @@ def create_glossary_section():
             st.write(f"**Total: {len(st.session_state.glossary)} terms**")
 
 
+import hashlib  # Add with other imports
+
+
+# FeedbackDB class for storing ratings
+class FeedbackDB:
+    def __init__(self):
+        # Initialize Firestore feedback collection
+        pass
+
+    def store_feedback(self, question: str, response: str, language: str, rating: str):
+        feedback_entry = {
+            "question": bleach.clean(question),
+            "response": bleach.clean(response),
+            "language": bleach.clean(language),
+            "rating": bleach.clean(rating),
+            "timestamp": firestore.SERVER_TIMESTAMP
+        }
+        try:
+            user_id = st.session_state.user_info['localId']
+            db.collection("feedback").document(user_id).collection("entries").add(feedback_entry)
+            log_user_activity(user_id, "submit_feedback", {"rating": rating})
+        except Exception as e:
+            st.error(f"Error saving feedback: {str(e)}")
 
 
 def create_input_interface(admin_only: bool = False) -> Tuple[Optional[str], str]:
@@ -1140,6 +1145,7 @@ def create_input_interface(admin_only: bool = False) -> Tuple[Optional[str], str
 
     return document_text_str, context_text
 
+
 def create_translation_and_chat_interface(document_text: str, context_text: Optional[str] = None) -> None:
     if not st.session_state.get('user_info'):
         st.warning("Please sign in to use Ustaad Jee!")
@@ -1147,11 +1153,9 @@ def create_translation_and_chat_interface(document_text: str, context_text: Opti
 
     st.markdown("<h3>Interact with Ustaad Jee</h3>", unsafe_allow_html=True)
 
-    has_indexes = (
-        "sentence_window_index" in st.session_state
-        and "automerging_index" in st.session_state
-        and st.session_state.get("vectorstore")
-    )
+    # Initialize feedback DB if not exists
+    if 'feedback_db' not in st.session_state:
+        st.session_state.feedback_db = FeedbackDB()
 
     col1, col2, col3 = st.columns([2, 2, 1])
     with col1:
@@ -1251,39 +1255,19 @@ def create_translation_and_chat_interface(document_text: str, context_text: Opti
 
                 feedback_key = f"feedback_{i}_{chat.get('timestamp', time.time())}"
                 if feedback_key not in st.session_state or not st.session_state.get(feedback_key, False):
-                    st.markdown("""
-                        <style>
-                        .cute-rating .streamlit-expanderHeader {
-                            font-size: 13px !important;
-                            padding: 0.2rem 0.5rem !important;
-                            background: transparent !important;
-                            border: none !important;
-                            border-radius: 15px !important;
-                        }
-                        .cute-rating .streamlit-expanderContent {
-                            padding: 0.3rem !important;
-                            border: none !important;
-                            background: transparent !important;
-                        }
-                        .cute-rating {
-                            border: none !important;
-                            background: transparent !important;
-                        }
-                        </style>
-                    """, unsafe_allow_html=True)
-
-                    with st.expander("Rate this response ", expanded=False):
+                    with st.expander("Rate this response", expanded=False):
                         rating_session_key = f"temp_rating_{feedback_key}"
                         if rating_session_key not in st.session_state:
                             st.session_state[rating_session_key] = 0
 
-                        cols = st.columns(7)
+                        st.write("How helpful was this response?")
+                        cols = st.columns(5)
                         for star_num in range(1, 6):
                             with cols[star_num - 1]:
                                 star_icon = "⭐" if star_num <= st.session_state[rating_session_key] else "☆"
                                 if st.button(
-                                        f"{star_icon}",
-                                        key=f"star_btn_{feedback_key}_{star_num}",
+                                        star_icon,
+                                        key=f"star_{feedback_key}_{star_num}",
                                         help=f"{star_num} star{'s' if star_num > 1 else ''}",
                                         use_container_width=True
                                 ):
@@ -1291,8 +1275,9 @@ def create_translation_and_chat_interface(document_text: str, context_text: Opti
                                     st.rerun()
 
                         if st.session_state[rating_session_key] > 0:
-                            with cols[5]:
-                                if st.button("✨", key=f"submit_{feedback_key}", type="primary", help="Submit rating"):
+                            submit_col, clear_col = st.columns([3, 1])
+                            with submit_col:
+                                if st.button("Submit Rating", key=f"submit_{feedback_key}", type="primary"):
                                     try:
                                         rating_value = str(st.session_state[rating_session_key])
                                         st.session_state.feedback_db.store_feedback(
@@ -1305,24 +1290,18 @@ def create_translation_and_chat_interface(document_text: str, context_text: Opti
                                         st.session_state[f"final_rating_{feedback_key}"] = st.session_state[
                                             rating_session_key]
                                         del st.session_state[rating_session_key]
-                                        st.success("Thanks! ")
+                                        st.success("Thanks for your feedback!")
                                         st.rerun()
                                     except Exception as e:
                                         st.error(f"Error submitting rating: {str(e)}")
-
-                            with cols[6]:
-                                if st.button("🧹", key=f"clear_{feedback_key}", help="Clear rating"):
+                            with clear_col:
+                                if st.button("Clear", key=f"clear_{feedback_key}"):
                                     st.session_state[rating_session_key] = 0
                                     st.rerun()
                 else:
-                    final_rating = st.session_state.get(f"final_rating_{feedback_key}", "N/A")
-                    if final_rating != "N/A":
-                        stars_display = "⭐" * int(final_rating)
-                        with st.expander(f"{stars_display}", expanded=False):
-                            st.markdown("*Thank you for the feedback!*")
-                    else:
-                        with st.expander(" Rated", expanded=False):
-                            st.markdown("*Thank you for the feedback!*")
+                    final_rating = st.session_state.get(f"final_rating_{feedback_key}", 0)
+                    with st.expander(f"Your rating: {'⭐' * int(final_rating)}", expanded=False):
+                        st.markdown("*Thank you for your feedback!*")
 
                 if i < len(st.session_state.chat_history) - 1:
                     st.markdown("<hr>", unsafe_allow_html=True)
@@ -1353,15 +1332,16 @@ def create_translation_and_chat_interface(document_text: str, context_text: Opti
                 quick_queries = {
                     "Summarize": "Provide a brief summary of the document.",
                     "Key Points": "List the key points and main concepts of the document.",
-                    "Simplify": "Explain the document in a very simple way.",
+                    "Simplify": "Explain the document in a very simple way without adding extra details.",
                     "Technical Terms": "List the key technical terms and their meanings."
                 }
                 with st.spinner(f"{quick_action}..."):
                     try:
-                        response = cached_retrieve_and_generate(
+                        # Pass document_text directly for quick actions
+                        response = generate_response(
                             query=quick_queries[quick_action],
                             context_text=context_text or "",
-                            index_version=st.session_state.index_version
+                            document_text=document_text  # Pass user-provided document
                         )
                         chat_entry = {
                             "query": quick_action,
@@ -1381,10 +1361,11 @@ def create_translation_and_chat_interface(document_text: str, context_text: Opti
                 chat_query = bleach.clean(chat_query.strip())
                 with st.spinner("Ustaad Jee is thinking..."):
                     try:
-                        response = cached_retrieve_and_generate(
+                        # Pass document_text for regular queries as well
+                        response = generate_response(
                             query=chat_query,
                             context_text=context_text or "",
-                            index_version=st.session_state.index_version
+                            document_text=document_text  # Pass user-provided document
                         )
                         chat_entry = {
                             "query": chat_query,
