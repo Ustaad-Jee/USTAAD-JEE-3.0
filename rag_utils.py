@@ -304,7 +304,7 @@ def has_indexed_documents() -> bool:
 
 
 def retrieve_relevant_chunks(query: str, top_k: int = 5) -> Tuple[List[str], float]:
-    """Retrieve relevant chunks from Qdrant with confidence score"""
+    """Retrieve relevant chunks from Qdrant with confidence score and conversation context"""
     try:
         if "qdrant_client" not in st.session_state:
             return [], 0.0
@@ -312,10 +312,22 @@ def retrieve_relevant_chunks(query: str, top_k: int = 5) -> Tuple[List[str], flo
         client = st.session_state["qdrant_client"]
         embeddings = st.session_state["embeddings"]
 
-        # Generate query embedding
-        query_embedding = embeddings.embed_query(query)
+        # Build context from recent conversation history
+        conversation_context = ""
+        if "chat_history" in st.session_state and st.session_state.chat_history:
+            last_3_chats = st.session_state.chat_history[-3:]
+            conversation_context = " ".join(
+                f"Previous Q: {chat['query']} A: {chat['response']}"
+                for chat in last_3_chats
+            )
 
-        # Search Qdrant
+        # Augment query with context
+        augmented_query = f"{conversation_context} {query}".strip()
+
+        # Generate query embedding
+        query_embedding = embeddings.embed_query(augmented_query)
+
+        # Search Qdrant (always hits the database)
         results = client.search(
             collection_name=BASE_COLLECTION,
             query_vector=query_embedding,
@@ -340,64 +352,80 @@ def retrieve_relevant_chunks(query: str, top_k: int = 5) -> Tuple[List[str], flo
         return [], 0.0
 
 
-# rag_utils.py (updated generate_response function)
 def generate_response(query: str, context_text: Optional[str] = None, document_text: Optional[str] = None) -> str:
+    """Generate response with hidden retrieval details but proper internal usage"""
     try:
-        # Use provided document_text if available, else fall back to session state
-        document_text = document_text if document_text is not None else st.session_state.get("document_text", "")
+        # Get current settings
+        chat_language = st.session_state.get("chat_language", "English")
+        has_indexed_docs = st.session_state.get("documents_indexed", False)
+        current_doc_text = document_text if document_text is not None else st.session_state.get("document_text", "")
 
-        # Retrieve relevant chunks from Qdrant (only if indexed and not overridden by document_text)
-        relevant_chunks, confidence = retrieve_relevant_chunks(query) if st.session_state.get("documents_indexed",
-                                                                                              False) else ([], 0.0)
+        # Retrieve from vector store if documents are indexed
+        relevant_chunks = []
+        confidence = 0.0
+        if has_indexed_docs:
+            relevant_chunks, confidence = retrieve_relevant_chunks(query)
         rag_context = "\n\n".join(relevant_chunks) if relevant_chunks else ""
 
-        # Prepare glossary section
-        glossary = st.session_state.get("glossary", {})
-        glossary_section = "\n".join(f"{eng}: {urdu}" for eng, urdu in glossary.items()) + "\n" if glossary else ""
+        # Build internal context markers (not shown to user)
+        internal_context = []
+        if context_text:
+            internal_context.append(f"[CONTEXT: {context_text}]")
+        if rag_context:
+            internal_context.append(f"[RAG_CONTENT: {rag_context}]")
 
-        # Determine if the question is specifically about the document
-        is_about_document = any(keyword in query.lower() for keyword in [
-            "document says", "uploaded file", "key points", "main ideas", "summary of the document"
-        ]) or document_text  # Also consider it about document if document_text exists
+        # Prepare glossary internally (only shown in Urdu responses)
+        internal_glossary = ""
+        if chat_language in ["Urdu", "Roman Urdu"]:
+            glossary = st.session_state.get("glossary", {})
+            if glossary:
+                internal_glossary = "\n".join(f"[GLOSSARY: {eng}={urdu}]" for eng, urdu in glossary.items())
 
-        if is_about_document:
-            # Use document-focused prompt
-            prompt = AppConfig.DOCUMENT_FOCUS_PROMPT.format(
-                glossary_section=glossary_section,
-                document_text=document_text,
-                supplementary_info=rag_context,
-                question=query
-            )
+        # Build conversation history internally
+        internal_history = ""
+        if "chat_history" in st.session_state and st.session_state.chat_history:
+            last_3_exchanges = st.session_state.chat_history[-3:]
+            internal_history = "[HISTORY: " + " | ".join(
+                f"Q:{chat['query']} A:{chat['response']}"
+                for chat in last_3_exchanges
+            ) + "]"
+
+        # Select prompt template based on language
+        if chat_language == "Urdu":
+            prompt_template = AppConfig.URDU_CHAT_PROMPT
+        elif chat_language == "Roman Urdu":
+            prompt_template = AppConfig.ROMAN_URDU_CHAT_PROMPT
         else:
-            # Build full context
-            full_context = ""
-            if document_text:
-                full_context += f"DOCUMENT CONTENT:\n{document_text}\n\n"
-            if rag_context:
-                full_context += f"SUPPLEMENTARY INFO:\n{rag_context}\n"
-            if context_text:
-                full_context += f"USER CONTEXT:\n{context_text}\n\n"
-
-            if full_context:
-                # Use RAG prompt
-                prompt = AppConfig.RAG_PROMPT.format(
-                    glossary_section=glossary_section,
-                    document_text=document_text,
-                    supplementary_info=rag_context,
-                    question=query
-                )
+            if current_doc_text or rag_context:
+                prompt_template = AppConfig.DOCUMENT_FOCUS_PROMPT
             else:
-                # Use direct prompt
-                prompt = AppConfig.DIRECT_PROMPT.format(
-                    glossary_section=glossary_section,
-                    question=query
-                )
+                prompt_template = AppConfig.DIRECT_PROMPT
 
-        # Generate response
-        response = st.session_state["llm"].generate(
-            prompt=prompt,
-            temperature=0.3
+        # Format the prompt with hidden internal markers
+        prompt = prompt_template.format(
+            glossary_section=internal_glossary,
+            document_text=current_doc_text,
+            supplementary_info="\n".join(internal_context),
+            question=query,
+            conversation_history=internal_history,
+            confidence_score=f"{confidence:.2f}",
+            source_lang="English",
+            target_lang=chat_language,
+            context_section="",  # Not shown to user
+            text=current_doc_text
         )
+
+        # Generate clean response (no internal markers shown)
+        response = st.session_state["llm"].generate(prompt=prompt, temperature=0.3)
+
+        # Clean up any accidental internal markers
+        response = response.split("]")[-1].split("[")[0].strip()
+
+        # Special handling for empty responses
+        if not response.strip() or "document doesn't cover" in response.lower():
+            if rag_context:
+                return "Here's what I found about this topic..."
+            return "I couldn't find information about that in my resources."
 
         return response
     except Exception as e:

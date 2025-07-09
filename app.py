@@ -1157,6 +1157,10 @@ def create_translation_and_chat_interface(document_text: str, context_text: Opti
     if 'feedback_db' not in st.session_state:
         st.session_state.feedback_db = FeedbackDB()
 
+    # Initialize chat history if not exists
+    if 'chat_history' not in st.session_state:
+        st.session_state.chat_history = []
+
     col1, col2, col3 = st.columns([2, 2, 1])
     with col1:
         translate_language = st.selectbox(
@@ -1214,7 +1218,7 @@ def create_translation_and_chat_interface(document_text: str, context_text: Opti
                                 "type": "translation",
                                 "timestamp": time.time()
                             }
-                        st.session_state.chat_history.append(chat_entry)
+                        st.session_state.chat_history.append({"query": chat_entry["query"], "response": chat_entry["response"]})
                         store_chat_history(st.session_state.user_info['localId'], chat_entry)
                         log_user_activity(st.session_state.user_info['localId'], "translation",
                                           {"language": translate_language, "document_length": len(document_text)})
@@ -1241,7 +1245,7 @@ def create_translation_and_chat_interface(document_text: str, context_text: Opti
                     """,
                     unsafe_allow_html=True
                 )
-                bot_name = "Ustaad Jee" if chat["language"] in ["Urdu", "Roman Urdu"] else "Ustaad Jee (English)"
+                bot_name = "Ustaad Jee" if chat_language in ["Urdu", "Roman Urdu"] else "Ustaad Jee (English)"
                 st.markdown(
                     f"""
                     <div class="chat-header">
@@ -1283,7 +1287,7 @@ def create_translation_and_chat_interface(document_text: str, context_text: Opti
                                         st.session_state.feedback_db.store_feedback(
                                             question=str(chat['query']),
                                             response=str(chat['response']),
-                                            language=str(chat['language']),
+                                            language=str(chat_language),
                                             rating=rating_value
                                         )
                                         st.session_state[feedback_key] = True
@@ -1327,62 +1331,44 @@ def create_translation_and_chat_interface(document_text: str, context_text: Opti
             )
         with col3:
             send_btn = st.form_submit_button("Send", type="primary", use_container_width=True)
+
         if send_btn:
             if quick_action != "Quick Action":
                 quick_queries = {
-                    "Summarize": "Provide a brief summary of the document.",
-                    "Key Points": "List the key points and main concepts of the document.",
-                    "Simplify": "Explain the document in a very simple way without adding extra details.",
-                    "Technical Terms": "List the key technical terms and their meanings."
+                    "Summarize": "Provide a concise summary of the key points in the user entered document",
+                    "Key Points": "List the main concepts and key points in the user entered document",
+                    "Simplify": "Explain this in simple terms without adding new information in the user entered document",
+                    "Technical Terms": "List and explain the technical terms used in the user entered document"
                 }
-                with st.spinner(f"{quick_action}..."):
-                    try:
-                        # Pass document_text directly for quick actions
-                        response = generate_response(
-                            query=quick_queries[quick_action],
-                            context_text=context_text or "",
-                            document_text=document_text  # Pass user-provided document
-                        )
-                        chat_entry = {
-                            "query": quick_action,
-                            "response": response,
-                            "language": chat_language,
-                            "type": "quick_action",
-                            "timestamp": time.time()
-                        }
-                        st.session_state.chat_history.append(chat_entry)
-                        store_chat_history(st.session_state.user_info['localId'], chat_entry)
-                        log_user_activity(st.session_state.user_info['localId'], "quick_action",
-                                          {"action": quick_action.lower().replace(" ", "_")})
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"Error: {str(e)}")
-            elif chat_query:
-                chat_query = bleach.clean(chat_query.strip())
+                processed_query = quick_queries[quick_action]
+            else:
+                processed_query = chat_query
+
+            if processed_query:
                 with st.spinner("Ustaad Jee is thinking..."):
                     try:
-                        # Pass document_text for regular queries as well
                         response = generate_response(
-                            query=chat_query,
-                            context_text=context_text or "",
-                            document_text=document_text  # Pass user-provided document
+                            query=processed_query,
+                            context_text=context_text,
+                            document_text=document_text
                         )
+
                         chat_entry = {
-                            "query": chat_query,
+                            "query": quick_action if quick_action != "Quick Action" else chat_query,
                             "response": response,
                             "language": chat_language,
-                            "type": "question",
+                            "type": "quick_action" if quick_action != "Quick Action" else "question",
                             "timestamp": time.time()
                         }
+
                         st.session_state.chat_history.append(chat_entry)
                         store_chat_history(st.session_state.user_info['localId'], chat_entry)
-                        log_user_activity(st.session_state.user_info['localId'], "chat",
-                                          {"query": chat_query, "language": chat_language})
                         st.rerun()
                     except Exception as e:
                         st.error(f"Error: {str(e)}")
             else:
-                st.warning("Please enter a question or select a quick action!")
+                st.warning("Please enter a question or select an action!")
+
 
 def create_usage_tips():
     with st.expander("How to Use Ustaad Jee"):
