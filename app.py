@@ -1,6 +1,4 @@
-#app.py
 import streamlit as st
-#it keeps giving me a weird error and this was how i solved it dont question it bro
 st.set_page_config(
     page_title="Ustaad Jee's Knowledge Hub",
     page_icon="dude.png",
@@ -12,8 +10,8 @@ import hashlib
 import requests
 import json
 from apconfig import AppConfig
-from typing import Optional, Dict
-from rag_utils import index_document, generate_response, clear_indexes, initialize_components, parse_document
+from typing import Optional, Dict, Tuple
+from rag_utils import index_document, generate_response, clear_indexes, initialize_components, parse_document, index_knowledge_hub_document
 from enum import Enum
 import os
 from abc import ABC, abstractmethod
@@ -22,7 +20,6 @@ from llm_utils import LLMWrapper, LLMProvider
 import io
 import time
 import bleach
-from typing import Tuple
 import firebase_admin
 from firebase_admin import credentials, auth, firestore
 from auth import (
@@ -33,21 +30,15 @@ from auth import (
     create_user_with_email_and_password,
     delete_user_account,
     raise_detailed_error
-
 )
 from firestore_utils import log_user_activity, store_chat_history, set_admin_user
-
-from firebase_admin import auth, firestore
 
 # Initialize Firebase Admin SDK
 if not firebase_admin._apps:
     try:
-        # Get service account from Streamlit Secrets as JSON content
-        service_account_json = st.secrets["firebase"]["SERVICE_ACCOUNT"]  # Fixed: Use proper nested access
-
+        service_account_json = st.secrets["firebase"]["SERVICE_ACCOUNT"]
         if service_account_json:
             try:
-                # Parse the JSON string from secrets
                 service_account_dict = json.loads(service_account_json)
                 cred = credentials.Certificate(service_account_dict)
                 firebase_admin.initialize_app(cred)
@@ -56,9 +47,7 @@ if not firebase_admin._apps:
                 raise ValueError(f"Invalid JSON in firebase.SERVICE_ACCOUNT: {str(e)}")
         else:
             raise ValueError("SERVICE_ACCOUNT not found in firebase secrets")
-
     except KeyError as e:
-        # Fallback to environment variable or file path
         service_account_path = os.getenv("FIREBASE_SERVICE_ACCOUNT_PATH")
         if service_account_path and os.path.exists(service_account_path):
             cred = credentials.Certificate(service_account_path)
@@ -75,18 +64,20 @@ if not firebase_admin._apps:
 # Get Firestore client
 db = firestore.client()
 
-
 @st.cache_data(show_spinner="Parsing document...", ttl=3600)
 def cached_parse_document(document: any) -> list:
     return parse_document(document)
 
 @st.cache_data(show_spinner="Indexing document...", ttl=3600)
 def cached_index_document(document_text: str) -> bool:
+    if not st.session_state.get("rag_initialized", False):
+        initialize_components()
     return index_document(document_text)
 
 @st.cache_data()
 def cached_retrieve_and_generate(query: str, context_text: str, index_version: int) -> str:
     return generate_response(query, context_text)
+
 def init_session_state():
     if 'llm' not in st.session_state:
         try:
@@ -95,7 +86,6 @@ def init_session_state():
                 st.error("OpenAI API key not found!")
                 st.session_state.connection_status = "Failed"
                 return
-
             llm = LLMWrapper(
                 provider=LLMProvider.OPENAI,
                 api_key=api_key,
@@ -121,16 +111,17 @@ def init_session_state():
         'auth_warning': "",
         'auth_success': "",
         'is_admin': False,
-        'index_version': 0  # For cache invalidation
+        'index_version': 0
     }
 
     for key, value in default_state.items():
         if key not in st.session_state:
             st.session_state[key] = value
 
+    if 'rag_initialized' not in st.session_state:
+        st.session_state.rag_initialized = False
 
 def create_auth_interface():
-    # Custom CSS for better styling
     st.markdown("""
     <style>
     .auth-container {
@@ -139,7 +130,6 @@ def create_auth_interface():
         padding: 0.5rem 1rem;
         margin-top: -14rem;
     }
-
     .auth-title {
         text-align: center;
         color: #1f2937;
@@ -147,7 +137,6 @@ def create_auth_interface():
         font-weight: 600;
         margin-bottom: 2rem;
     }
-
     .stTextInput > div > div > input {
         border-radius: 8px;
         border: 2px solid #e5e7eb;
@@ -155,12 +144,10 @@ def create_auth_interface():
         font-size: 1rem;
         transition: border-color 0.2s;
     }
-
     .stTextInput > div > div > input:focus {
         border-color: #3b82f6;
         box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
     }
-
     .stButton > button {
         width: 100%;
         border-radius: 8px;
@@ -173,23 +160,19 @@ def create_auth_interface():
         transition: all 0.2s;
         margin-top: 1rem;
     }
-
     .stButton > button:hover {
         background: linear-gradient(135deg, #1d4ed8 0%, #1e40af 100%);
         transform: translateY(-1px);
         box-shadow: 0 4px 12px rgba(59, 130, 246, 0.4);
     }
-
     .auth-links {
         text-align: center;
         margin-top: 1.5rem;
     }
-
     .auth-links .stButton {
         display: inline-block;
         margin: 0 0.5rem;
     }
-
     .auth-links .stButton > button {
         background: none !important;
         border: none !important;
@@ -207,7 +190,6 @@ def create_auth_interface():
         width: auto !important;
         margin: 0 !important;
     }
-
     .auth-links .stButton > button:hover {
         color: #1d4ed8 !important;
         text-decoration: underline !important;
@@ -215,24 +197,20 @@ def create_auth_interface():
         transform: none !important;
         box-shadow: none !important;
     }
-
     .auth-links .stButton > button:focus {
         outline: 2px solid #3b82f6 !important;
         outline-offset: 2px !important;
         box-shadow: none !important;
     }
-
     .auth-divider {
         margin: 1rem 0;
         color: #6b7280;
         font-size: 0.9rem;
     }
-
     .back-link {
         text-align: center;
         margin-bottom: 1rem;
     }
-
     .back-link .stButton > button {
         background: none !important;
         border: none !important;
@@ -248,7 +226,6 @@ def create_auth_interface():
         margin: 0 !important;
         box-shadow: none !important;
     }
-
     .back-link .stButton > button:hover {
         color: #3b82f6 !important;
         text-decoration: underline !important;
@@ -256,14 +233,12 @@ def create_auth_interface():
         transform: none !important;
         box-shadow: none !important;
     }
-
     .form-description {
         text-align: center;
         color: #6b7280;
         margin-bottom: 1.5rem;
         font-size: 0.95rem;
     }
-
     .stAlert {
         border-radius: 8px;
         margin-top: 1rem;
@@ -271,17 +246,12 @@ def create_auth_interface():
     </style>
     """, unsafe_allow_html=True)
 
-    # Center the form using columns
     col1, col2, col3 = st.columns([1, 2, 1])
-
     with col2:
         st.markdown('<div class="auth-container">', unsafe_allow_html=True)
-
-        # Initialize session state for auth mode
         if 'auth_mode' not in st.session_state:
             st.session_state.auth_mode = 'signin'
 
-        # Back to Sign In link (for sign up and reset password modes)
         if st.session_state.auth_mode != 'signin':
             st.markdown('<div class="back-link">', unsafe_allow_html=True)
             if st.button("← Back to Sign In", key="back_to_signin"):
@@ -289,31 +259,14 @@ def create_auth_interface():
                 st.rerun()
             st.markdown('</div>', unsafe_allow_html=True)
 
-        # Sign In Form
         if st.session_state.auth_mode == 'signin':
             st.markdown('<h1 class="auth-title">Sign In</h1>', unsafe_allow_html=True)
             st.markdown('<p class="form-description">Welcome back! Please sign in to your account.</p>',
                         unsafe_allow_html=True)
-
             with st.form("sign_in_form", clear_on_submit=False):
-                email = st.text_input(
-                    "Email Address",
-                    placeholder="Enter your email",
-                    label_visibility="collapsed"
-                )
-                password = st.text_input(
-                    "Password",
-                    type="password",
-                    placeholder="Enter your password",
-                    label_visibility="collapsed"
-                )
-
-                submit = st.form_submit_button(
-                    "Sign In",
-                    use_container_width=True,
-                    type="primary"
-                )
-
+                email = st.text_input("Email Address", placeholder="Enter your email", label_visibility="collapsed")
+                password = st.text_input("Password", type="password", placeholder="Enter your password", label_visibility="collapsed")
+                submit = st.form_submit_button("Sign In", use_container_width=True, type="primary")
                 if submit:
                     if not email or not password:
                         st.error("Please fill in all fields")
@@ -322,7 +275,6 @@ def create_auth_interface():
                             with st.spinner("Signing you in..."):
                                 id_token = sign_in_with_email_and_password(email, password)['idToken']
                                 user_info = get_account_info(id_token)["users"][0]
-
                                 if not user_info["emailVerified"]:
                                     send_email_verification(id_token)
                                     st.session_state.auth_warning = 'Check your email to verify your account'
@@ -330,15 +282,13 @@ def create_auth_interface():
                                     st.session_state.user_info = user_info
                                     st.session_state.id_token = id_token
                                     user = auth.get_user(user_info['localId'])
-                                    st.session_state.is_admin = user.custom_claims.get('admin',
-                                                                                       False) if user.custom_claims else False
+                                    st.session_state.is_admin = user.custom_claims.get('admin', False) if user.custom_claims else False
                                     log_user_activity(user_info['localId'], "login", {"email": user_info['email']})
                                     st.success("Welcome! Redirecting...")
                                     st.rerun()
                         except requests.exceptions.HTTPError as error:
                             error_message = json.loads(error.args[1])['error']['message']
-                            if error_message in {"INVALID_EMAIL", "EMAIL_NOT_FOUND", "INVALID_PASSWORD",
-                                                 "MISSING_PASSWORD"}:
+                            if error_message in {"INVALID_EMAIL", "EMAIL_NOT_FOUND", "INVALID_PASSWORD", "MISSING_PASSWORD"}:
                                 st.session_state.auth_warning = 'Invalid email or password. Please try again.'
                             else:
                                 st.session_state.auth_warning = 'Something went wrong. Please try again later.'
@@ -346,7 +296,6 @@ def create_auth_interface():
                             print(error)
                             st.session_state.auth_warning = 'Connection error. Please try again later.'
 
-            # Links for Reset Password and Sign Up
             st.markdown('<div class="auth-links">', unsafe_allow_html=True)
             col_a, col_b = st.columns(2)
             with col_a:
@@ -359,31 +308,14 @@ def create_auth_interface():
                     st.rerun()
             st.markdown('</div>', unsafe_allow_html=True)
 
-        # Sign Up Form
         elif st.session_state.auth_mode == 'signup':
             st.markdown('<h1 class="auth-title">Create Account</h1>', unsafe_allow_html=True)
             st.markdown('<p class="form-description">Join us today! Create your account in just a few steps.</p>',
                         unsafe_allow_html=True)
-
             with st.form("sign_up_form", clear_on_submit=False):
-                email = st.text_input(
-                    "Email Address",
-                    placeholder="Enter your email",
-                    label_visibility="collapsed"
-                )
-                password = st.text_input(
-                    "Password",
-                    type="password",
-                    placeholder="Choose a strong password (min 6 characters)",
-                    label_visibility="collapsed"
-                )
-
-                submit = st.form_submit_button(
-                    "Create Account",
-                    use_container_width=True,
-                    type="primary"
-                )
-
+                email = st.text_input("Email Address", placeholder="Enter your email", label_visibility="collapsed")
+                password = st.text_input("Password", type="password", placeholder="Choose a strong password (min 6 characters)", label_visibility="collapsed")
+                submit = st.form_submit_button("Create Account", use_container_width=True, type="primary")
                 if submit:
                     if not email or not password:
                         st.error("Please fill in all fields")
@@ -396,14 +328,12 @@ def create_auth_interface():
                                 user_info = get_account_info(id_token)["users"][0]
                                 send_email_verification(id_token)
                                 st.session_state.auth_success = 'Account created! Check your inbox to verify your email.'
-                                log_user_activity(user_info['localId'], "account_creation",
-                                                  {"email": user_info['email']})
+                                log_user_activity(user_info['localId'], "account_creation", {"email": user_info['email']})
                         except requests.exceptions.HTTPError as error:
                             error_message = json.loads(error.args[1])['error']['message']
                             if error_message == "EMAIL_EXISTS":
                                 st.session_state.auth_warning = 'This email is already registered. Try signing in instead.'
-                            elif error_message in {"INVALID_EMAIL", "INVALID_PASSWORD", "MISSING_PASSWORD",
-                                                   "MISSING_EMAIL", "WEAK_PASSWORD"}:
+                            elif error_message in {"INVALID_EMAIL", "INVALID_PASSWORD", "MISSING_PASSWORD", "MISSING_EMAIL", "WEAK_PASSWORD"}:
                                 st.session_state.auth_warning = 'Please check your email format and password strength.'
                             else:
                                 st.session_state.auth_warning = 'Something went wrong. Please try again later.'
@@ -411,26 +341,13 @@ def create_auth_interface():
                             print(error)
                             st.session_state.auth_warning = 'Connection error. Please try again later.'
 
-        # Reset Password Form
         elif st.session_state.auth_mode == 'reset':
             st.markdown('<h1 class="auth-title">Reset Password</h1>', unsafe_allow_html=True)
-            st.markdown(
-                '<p class="form-description">Enter your email address and we\'ll send you a link to reset your password.</p>',
-                unsafe_allow_html=True)
-
+            st.markdown('<p class="form-description">Enter your email address and we\'ll send you a link to reset your password.</p>',
+                        unsafe_allow_html=True)
             with st.form("reset_password_form", clear_on_submit=False):
-                email = st.text_input(
-                    "Email Address",
-                    placeholder="Enter your registered email",
-                    label_visibility="collapsed"
-                )
-
-                submit = st.form_submit_button(
-                    "Send Reset Link",
-                    use_container_width=True,
-                    type="primary"
-                )
-
+                email = st.text_input("Email Address", placeholder="Enter your registered email", label_visibility="collapsed")
+                submit = st.form_submit_button("Send Reset Link", use_container_width=True, type="primary")
                 if submit:
                     if not email:
                         st.error("Please enter your email address")
@@ -448,14 +365,12 @@ def create_auth_interface():
                         except Exception:
                             st.session_state.auth_warning = 'Connection error. Please try again later.'
 
-        # Display messages
         if st.session_state.get('auth_warning'):
             st.error(st.session_state.auth_warning)
             st.session_state.auth_warning = ""
         if st.session_state.get('auth_success'):
             st.success(st.session_state.auth_success)
             st.session_state.auth_success = ""
-
         st.markdown('</div>', unsafe_allow_html=True)
 
 def create_admin_interface():
@@ -517,30 +432,54 @@ def create_admin_interface():
                     st.warning("Please enter a valid email address.")
 
     with tab2:
-        st.markdown("#### Document Management")
-        st.info("📈 Documents are processed with Sentence Window, Auto-merging, and Qdrant-hosted embeddings.")
-        document_text, context_text = create_admin_input_interface()
+        st.markdown("#### Knowledge Hub Management")
+        st.info(
+            "📈 Documents are processed with Sentence Window, Auto-merging, and Qdrant-hosted embeddings in the Knowledge Hub.")
+        document_text, _ = create_admin_input_interface()
         has_documents = "sentence_window_index" in st.session_state or "automerging_index" in st.session_state
         if has_documents:
-            st.success("📄 Document indexed!")
+            st.success("📄 Knowledge Hub indexed!")
             col1, col2 = st.columns(2)
             with col1:
                 st.info("Current indexes: Sentence Window, Auto-merging, Qdrant")
             with col2:
-                if st.button("Clear Current Indexes", key="admin_clear_indexes"):
+                if st.button("Kill Switch", key="admin_clear_indexes"):
                     try:
                         clear_indexes()
                         st.session_state.admin_uploaded_document = ''
                         st.session_state.admin_context_text = ''
-                        st.success("✅ All indexes cleared.")
+                        st.success("✅ Knowledge Hub cleared.")
                         log_user_activity(
                             st.session_state.user_info['localId'],
-                            "admin_clear_indexes",
-                            {"action": "cleared_all_indexes"}
+                            "clear_knowledge_hub",
+                            {"action": "cleared_knowledge_hub"}
                         )
                         st.rerun()
                     except Exception as e:
-                        st.error(f"❌ Error clearing indexes: {str(e)}")
+                        st.error(f"❌ Error clearing Knowledge Hub: {str(e)}")
+
+        st.markdown("---")
+        st.markdown("#### Knowledge Hub")
+        st.info("This contains supplemental information used when questions go beyond the main document")
+        hub_doc = st.file_uploader(
+            "Upload to Knowledge Hub",
+            type=["txt", "pdf"],
+            key="knowledge_hub_upload"
+        )
+        if hub_doc and st.button("Add to Knowledge Hub"):
+            try:
+                with st.spinner("Adding to knowledge hub..."):
+                    if index_knowledge_hub_document(hub_doc):
+                        st.success("✅ Added to knowledge hub!")
+                        log_user_activity(
+                            st.session_state.user_info['localId'],
+                            "index_knowledge_hub",
+                            {"document_name": hub_doc.name}
+                        )
+                    else:
+                        st.error("Failed to add to knowledge hub")
+            except Exception as e:
+                st.error(f"Error: {str(e)}")
 
     with tab3:
         st.markdown("#### Activity Logs")
@@ -654,24 +593,20 @@ def create_admin_interface():
         except Exception as e:
             st.error(f"Error fetching chat history: {str(e)}")
 
-
 def create_admin_input_interface() -> Tuple[Optional[str], Optional[str]]:
     if not st.session_state.get('is_admin', False):
         st.warning("Only admins can access this section.")
         return None, None
 
-    st.markdown("### Document Management (Admin Only)")
-    st.markdown("Upload documents to the Qdrant vector database for enhanced RAG functionality.")
-
+    st.markdown("### Knowledge Hub Management (Admin Only)")
+    st.markdown("Upload documents to the Knowledge Hub for Ustaad Jee's RAG functionality.")
     uploaded_document = st.file_uploader(
-        "Upload Document to Qdrant Vector Database",
+        "Upload Document to Knowledge Hub",
         type=["txt", "pdf"],
-        help="Upload a text or PDF file to be indexed in the Qdrant vector database for RAG functionality.",
-        key="admin_document_upload"
+        help="Upload a text or PDF file to be indexed in the Knowledge Hub.",
+        key="admin_knowledge_hub_upload"
     )
-
     document_text = None
-
     if uploaded_document:
         try:
             with st.spinner("Processing document..."):
@@ -679,7 +614,6 @@ def create_admin_input_interface() -> Tuple[Optional[str], Optional[str]]:
                 document_text = "\n".join(document_chunks) if isinstance(document_chunks, list) else document_chunks
                 document_text = bleach.clean(document_text, tags=[], strip=True)
                 st.session_state.admin_uploaded_document = document_text
-
                 if st.session_state.get('user_info'):
                     log_user_activity(
                         st.session_state.user_info['localId'],
@@ -693,19 +627,17 @@ def create_admin_input_interface() -> Tuple[Optional[str], Optional[str]]:
 
     st.markdown("#### Or Enter Text Directly")
     manual_text = st.text_area(
-        "Paste Document Text",
+        "Paste Document Text for Knowledge Hub",
         height=300,
-        placeholder="Paste your document text here to add to the Qdrant vector database...",
+        placeholder="Paste your document text here to add to the Knowledge Hub...",
         help="Type or paste the document text for indexing.",
-        key="admin_manual_text_input"
+        key="admin_knowledge_hub_text_input"
     )
-
     if manual_text.strip():
         document_text = bleach.clean(manual_text.strip(), tags=[], strip=True)
         st.session_state.admin_uploaded_document = document_text
 
     final_document_text = st.session_state.get('admin_uploaded_document', '')
-
     if final_document_text:
         with st.expander("Document Preview"):
             st.text_area(
@@ -716,12 +648,11 @@ def create_admin_input_interface() -> Tuple[Optional[str], Optional[str]]:
             )
             st.caption(f"Document length: {len(final_document_text)} characters")
 
-    if final_document_text and st.button("Index Document to Qdrant Vector Database", key="admin_index_doc_btn",
-                                         type="primary"):
+    if final_document_text and st.button("Index Document to Knowledge Hub", key="admin_index_doc_btn", type="primary"):
         try:
             success = cached_index_document(final_document_text)
             if success:
-                st.success("✅ Document indexed successfully!")
+                st.success("✅ Document indexed successfully to Knowledge Hub!")
                 st.session_state.index_version += 1
                 if st.session_state.get('user_info'):
                     log_user_activity(
@@ -733,47 +664,42 @@ def create_admin_input_interface() -> Tuple[Optional[str], Optional[str]]:
         except Exception as e:
             st.error(f"Error during indexing: {str(e)}")
 
-    st.markdown("#### Qdrant Vector Database Status")
+    st.markdown("#### Knowledge Hub Status")
     if st.session_state.get("vectorstore"):
-        st.success("✅ Qdrant vector database is active and ready for RAG queries")
+        st.success("✅ Knowledge Hub is active and ready for RAG queries")
         if st.session_state.get("sentence_window_index") and st.session_state.get("automerging_index"):
             st.info("🔍 Advanced RAG indexes are available (Sentence Window + Auto-merging)")
         else:
-            st.info("📊 Basic Qdrant vector store is available")
+            st.info("📊 Basic Knowledge Hub vector store is available")
     else:
-        st.warning("⚠️ No Qdrant vector database found. Upload and index documents to enable RAG functionality.")
+        st.warning("⚠️ No Knowledge Hub found. Upload and index documents to enable RAG functionality.")
 
-    if st.session_state.get("vectorstore") and st.button("Clear Qdrant Vector Database", key="clear_vector_db",
-                                                         type="secondary"):
+    if st.session_state.get("vectorstore") and st.button("Clear Knowledge Hub", key="clear_knowledge_hub", type="secondary"):
         try:
             clear_indexes()
             st.session_state.admin_uploaded_document = ''
             st.session_state.admin_context_text = ''
-            st.success("Qdrant vector database cleared successfully!")
+            st.success("Knowledge Hub cleared successfully!")
             log_user_activity(
                 st.session_state.user_info['localId'],
-                "clear_qdrant_indexes",
-                {"action": "cleared_qdrant_indexes"}
+                "clear_knowledge_hub",
+                {"action": "cleared_knowledge_hub"}
             )
             st.session_state.index_version += 1
             st.rerun()
         except Exception as e:
-            st.error(f"Error clearing Qdrant vector database: {str(e)}")
+            st.error(f"Error clearing Knowledge Hub: {str(e)}")
 
-    return final_document_text, None
-
+    return document_text, None
 
 def create_llm_configuration_section():
     st.markdown("### Configure Ustaad Jee's Brain 🧠")
-
     if not st.session_state.get('is_admin', False):
-        # Non-admin users: Display connection status only
         status_color = {"Connected": "🟢", "Not Connected": "🟡", "Failed": "🔴"}
         st.info(f"Status: {status_color.get(st.session_state.connection_status, '🟡')} {st.session_state.connection_status}")
         st.markdown("Using OpenAI GPT-4o-mini (default configuration).")
         return
 
-    # Admin users: Full configuration options
     col1, col2 = st.columns([1, 1])
     with col1:
         provider_options = {
@@ -783,33 +709,16 @@ def create_llm_configuration_section():
             "OpenRouter": LLMProvider.OPENROUTER,
             "Local LLM": LLMProvider.LOCAL
         }
-        selected_provider = st.selectbox(
-            "Select Brain",
-            list(provider_options.keys()),
-            help="Choose the AI provider for Ustaad Jee."
-        )
+        selected_provider = st.selectbox("Select Brain", list(provider_options.keys()), help="Choose the AI provider for Ustaad Jee.")
         provider_enum = provider_options[selected_provider]
         available_models = AppConfig.MODELS.get(selected_provider, [])
-        selected_model = st.selectbox(
-            "Select Model",
-            available_models,
-            help="Pick a model for Ustaad Jee's brain."
-        )
+        selected_model = st.selectbox("Select Model", available_models, help="Pick a model for Ustaad Jee's brain.")
     with col2:
         if selected_provider != "Local LLM":
-            api_key = st.text_input(
-                "API Key",
-                type="password",
-                placeholder="Enter your API key",
-                help="Required to connect to the AI provider."
-            )
+            api_key = st.text_input("API Key", type="password", placeholder="Enter your API key", help="Required to connect to the AI provider.")
         else:
             api_key = None
-            base_url = st.text_input(
-                "Local Server URL",
-                value="http://localhost:11434",
-                help="URL where the local LLM is running."
-            )
+            base_url = st.text_input("Local Server URL", value="http://localhost:11434", help="URL where the local LLM is running.")
         if st.button("Test Connection", type="secondary", key="test_connection_btn"):
             try:
                 config = {"model": selected_model}
@@ -827,7 +736,7 @@ def create_llm_configuration_section():
                         if test_response:
                             st.success("Connection successful!")
                             st.session_state.connection_status = "Connected"
-                            st.session_state.llm = test_llm  # Assign the new LLM to session state
+                            st.session_state.llm = test_llm
                             log_user_activity(st.session_state.user_info['localId'], "llm_connection",
                                               {"provider": selected_provider, "model": selected_model})
                         else:
@@ -855,7 +764,6 @@ def create_llm_configuration_section():
     status_color = {"Connected": "🟢", "Not Connected": "🟡", "Failed": "🔴"}
     st.info(f"Status: {status_color.get(st.session_state.connection_status, '🟡')} {st.session_state.connection_status}")
 
-
 def create_glossary_section():
     st.markdown("### Ustaad Jee's Glossary 📚")
     st.markdown("Add technical terms for Ustaad Jee to use!")
@@ -870,15 +778,13 @@ def create_glossary_section():
         st.write("")
         if st.button("+ Add", key="add_term_btn"):
             if english_term and urdu_term:
-                st.session_state.glossary[english_term]=urdu_term
+                st.session_state.glossary[english_term] = urdu_term
                 st.success(f"Added: {english_term} → {urdu_term}")
                 log_user_activity(st.session_state.user_info['localId'], "add_glossary_term",
                                   {"english_term": english_term, "urdu_term": urdu_term})
                 st.rerun()
             else:
                 st.warning("Both terms are required!")
-
-
 
     if st.session_state.glossary:
         glossary_df = pd.DataFrame([
@@ -903,64 +809,52 @@ def create_glossary_section():
         key=f"glossary_upload_{len(st.session_state.glossary)}",
         help="CSV must have 'English Term' and 'Urdu Term' columns."
     )
-
     if uploaded_file is not None:
         try:
             file_size = uploaded_file.size if hasattr(uploaded_file, 'size') else 0
             if file_size > 1024 * 1024:
                 st.error("File too large (max 1MB)!")
                 return
-
             uploaded_df = pd.read_csv(uploaded_file)
             required_columns = ["English Term", "Urdu Term"]
             if not all(col in uploaded_df.columns for col in required_columns):
                 st.error(f"CSV must have columns: {', '.join(required_columns)}")
                 st.info(f"Found columns: {', '.join(uploaded_df.columns)}")
                 return
-
             if len(uploaded_df) > 1000:
                 st.error("Too many terms (max 1000)!")
                 return
-
             if st.button("Upload Terms", key="process_upload_btn", type="primary"):
                 try:
                     if not merge_option:
                         st.session_state.glossary = {}
-
                     added_count = 0
                     skipped_count = 0
-
                     for _, row in uploaded_df.iterrows():
                         english_term = str(row["English Term"]).strip()
                         urdu_term = str(row["Urdu Term"]).strip()
                         english_term = bleach.clean(english_term)
                         urdu_term = bleach.clean(urdu_term)
-
                         if english_term and urdu_term and english_term != 'nan' and urdu_term != 'nan':
                             if english_term not in st.session_state.glossary or not merge_option:
                                 st.session_state.glossary[english_term] = urdu_term
                                 added_count += 1
                             else:
                                 skipped_count += 1
-
                     if added_count > 0:
                         st.success(f"Added {added_count} new terms!")
                         log_user_activity(st.session_state.user_info['localId'], "upload_glossary",
                                           {"terms_added": added_count, "terms_skipped": skipped_count})
                     if skipped_count > 0:
                         st.info(f"Skipped {skipped_count} existing terms.")
-
                     time.sleep(0.5)
                     st.rerun()
-
                 except Exception as e:
                     st.error(f"Error: {str(e)}")
-
             else:
                 st.info(f"Ready to upload {len(uploaded_df)} terms. Click 'Upload Terms'!")
                 with st.expander("Preview first 5 terms"):
                     st.dataframe(uploaded_df.head())
-
         except Exception as e:
             st.error(f"Failed to read CSV: {str(e)}")
             st.info("Ensure CSV has 'English Term' and 'Urdu Term' columns!")
@@ -980,7 +874,6 @@ def create_glossary_section():
                     log_user_activity(st.session_state.user_info['localId'], "remove_glossary_term",
                                       {"english_term": eng})
                     st.rerun()
-
         col1, col2, col3 = st.columns([1, 1, 2])
         with col1:
             if st.button("Clear All", type="secondary", key="clear_all_btn"):
@@ -991,14 +884,8 @@ def create_glossary_section():
         with col2:
             st.write(f"**Total: {len(st.session_state.glossary)} terms**")
 
-
-import hashlib  # Add with other imports
-
-
-# FeedbackDB class for storing ratings
 class FeedbackDB:
     def __init__(self):
-        # Initialize Firestore feedback collection
         pass
 
     def store_feedback(self, question: str, response: str, language: str, rating: str):
@@ -1016,10 +903,7 @@ class FeedbackDB:
         except Exception as e:
             st.error(f"Error saving feedback: {str(e)}")
 
-
 def create_input_interface(admin_only: bool = False) -> Tuple[Optional[str], str]:
-    """Create interface for uploading documents and context"""
-    # Initialize document tracking
     if 'document_hash' not in st.session_state:
         st.session_state.document_hash = ""
     if 'document_indexed' not in st.session_state:
@@ -1033,23 +917,17 @@ def create_input_interface(admin_only: bool = False) -> Tuple[Optional[str], str
         help="Upload a text or PDF file for Ustaad Jee to process.",
         key="main_document_upload"
     )
-
     document_text_str = st.session_state.get('uploaded_document', '')
     if uploaded_document:
         try:
             document_text = parse_document(uploaded_document)
             new_text = "\n".join(document_text) if isinstance(document_text, list) else document_text
             new_text = bleach.clean(new_text, tags=[], strip=True)
-
-            # Generate hash to prevent re-indexing
             new_hash = hashlib.md5(new_text.encode()).hexdigest()
-
-            # Only update if document changed
             if new_hash != st.session_state.document_hash:
                 st.session_state.uploaded_document = new_text
                 st.session_state.document_hash = new_hash
-                st.session_state.document_indexed = False  # Reset indexing status
-
+                st.session_state.document_indexed = False
                 if st.session_state.get('user_info'):
                     log_user_activity(
                         st.session_state.user_info['localId'],
@@ -1070,20 +948,17 @@ def create_input_interface(admin_only: bool = False) -> Tuple[Optional[str], str
         help="Type or paste the document for Ustaad Jee.",
         key="main_document_text_input"
     )
-
-    # Update hash if text changes
     if document_text_str:
         new_hash = hashlib.md5(document_text_str.encode()).hexdigest()
         if new_hash != st.session_state.document_hash:
             st.session_state.uploaded_document = document_text_str
             st.session_state.document_hash = new_hash
-            st.session_state.document_indexed = False  # Reset indexing status
+            st.session_state.document_indexed = False
 
     document_text_str = bleach.clean(document_text_str.strip(), tags=[], strip=True) if document_text_str else ""
     st.session_state.uploaded_document = document_text_str
     document_text = parse_document(document_text_str) if document_text_str else None
 
-    # Admin indexing section
     if document_text and st.session_state.get('is_admin', False):
         if st.session_state.document_indexed:
             st.success("✅ Document already indexed to Qdrant vector database!")
@@ -1094,7 +969,7 @@ def create_input_interface(admin_only: bool = False) -> Tuple[Optional[str], str
                         success = index_document(document_text_str)
                         if success:
                             st.success("Document indexed successfully to Qdrant vector database!")
-                            st.session_state.document_indexed = True  # Mark as indexed
+                            st.session_state.document_indexed = True
                             log_user_activity(
                                 st.session_state.user_info['localId'],
                                 "index_document",
@@ -1105,8 +980,6 @@ def create_input_interface(admin_only: bool = False) -> Tuple[Optional[str], str
                             st.error("Failed to index document to Qdrant vector database.")
                 except Exception as e:
                     st.error(f"Error indexing to Qdrant: {str(e)}")
-    elif document_text and not st.session_state.get('is_admin', False):
-        st.warning("Only admins can index documents to Qdrant vector database.")
 
     st.markdown("### Provide Additional Context")
     uploaded_context = st.file_uploader(
@@ -1142,9 +1015,7 @@ def create_input_interface(admin_only: bool = False) -> Tuple[Optional[str], str
     )
     context_text = bleach.clean(context_text.strip(), tags=[], strip=True) if context_text else ""
     st.session_state.context_text = context_text
-
     return document_text_str, context_text
-
 
 def create_translation_and_chat_interface(document_text: str, context_text: Optional[str] = None) -> None:
     if not st.session_state.get('user_info'):
@@ -1152,12 +1023,8 @@ def create_translation_and_chat_interface(document_text: str, context_text: Opti
         return
 
     st.markdown("<h3>Interact with Ustaad Jee</h3>", unsafe_allow_html=True)
-
-    # Initialize feedback DB if not exists
     if 'feedback_db' not in st.session_state:
         st.session_state.feedback_db = FeedbackDB()
-
-    # Initialize chat history if not exists
     if 'chat_history' not in st.session_state:
         st.session_state.chat_history = []
 
@@ -1181,11 +1048,17 @@ def create_translation_and_chat_interface(document_text: str, context_text: Opti
             if document_text and st.session_state.llm:
                 with st.spinner("Translating..."):
                     try:
+                        last_6_exchanges = ""
+                        if st.session_state.chat_history:
+                            last_6_exchanges = "\n".join(
+                                f"Q: {chat['query']}\nA: {chat['response']}"
+                                for chat in st.session_state.chat_history[-6:]
+                            )
                         if translate_language == "Urdu":
                             translation = st.session_state.llm.translate_to_urdu(
                                 text=document_text,
                                 glossary=st.session_state.glossary if st.session_state.glossary else None,
-                                context=context_text,
+                                context=context_text + "\n\nConversation Context:\n" + last_6_exchanges,
                                 temperature=0.3
                             )
                             chat_entry = {
@@ -1199,7 +1072,7 @@ def create_translation_and_chat_interface(document_text: str, context_text: Opti
                             translation = st.session_state.llm.translate_to_roman_urdu(
                                 text=document_text,
                                 glossary=st.session_state.glossary if st.session_state.glossary else None,
-                                context=context_text,
+                                context=context_text + "\n\nConversation Context:\n" + last_6_exchanges,
                                 temperature=0.3
                             )
                             chat_entry = {
@@ -1218,7 +1091,8 @@ def create_translation_and_chat_interface(document_text: str, context_text: Opti
                                 "type": "translation",
                                 "timestamp": time.time()
                             }
-                        st.session_state.chat_history.append({"query": chat_entry["query"], "response": chat_entry["response"]})
+                        st.session_state.chat_history.append(
+                            {"query": chat_entry["query"], "response": chat_entry["response"]})
                         store_chat_history(st.session_state.user_info['localId'], chat_entry)
                         log_user_activity(st.session_state.user_info['localId'], "translation",
                                           {"language": translate_language, "document_length": len(document_text)})
@@ -1256,14 +1130,12 @@ def create_translation_and_chat_interface(document_text: str, context_text: Opti
                     """,
                     unsafe_allow_html=True
                 )
-
                 feedback_key = f"feedback_{i}_{chat.get('timestamp', time.time())}"
                 if feedback_key not in st.session_state or not st.session_state.get(feedback_key, False):
                     with st.expander("Rate this response", expanded=False):
                         rating_session_key = f"temp_rating_{feedback_key}"
                         if rating_session_key not in st.session_state:
                             st.session_state[rating_session_key] = 0
-
                         st.write("How helpful was this response?")
                         cols = st.columns(5)
                         for star_num in range(1, 6):
@@ -1277,7 +1149,6 @@ def create_translation_and_chat_interface(document_text: str, context_text: Opti
                                 ):
                                     st.session_state[rating_session_key] = star_num
                                     st.rerun()
-
                         if st.session_state[rating_session_key] > 0:
                             submit_col, clear_col = st.columns([3, 1])
                             with submit_col:
@@ -1291,8 +1162,7 @@ def create_translation_and_chat_interface(document_text: str, context_text: Opti
                                             rating=rating_value
                                         )
                                         st.session_state[feedback_key] = True
-                                        st.session_state[f"final_rating_{feedback_key}"] = st.session_state[
-                                            rating_session_key]
+                                        st.session_state[f"final_rating_{feedback_key}"] = st.session_state[rating_session_key]
                                         del st.session_state[rating_session_key]
                                         st.success("Thanks for your feedback!")
                                         st.rerun()
@@ -1306,7 +1176,6 @@ def create_translation_and_chat_interface(document_text: str, context_text: Opti
                     final_rating = st.session_state.get(f"final_rating_{feedback_key}", 0)
                     with st.expander(f"Your rating: {'⭐' * int(final_rating)}", expanded=False):
                         st.markdown("*Thank you for your feedback!*")
-
                 if i < len(st.session_state.chat_history) - 1:
                     st.markdown("<hr>", unsafe_allow_html=True)
     else:
@@ -1331,7 +1200,6 @@ def create_translation_and_chat_interface(document_text: str, context_text: Opti
             )
         with col3:
             send_btn = st.form_submit_button("Send", type="primary", use_container_width=True)
-
         if send_btn:
             if quick_action != "Quick Action":
                 quick_queries = {
@@ -1343,7 +1211,6 @@ def create_translation_and_chat_interface(document_text: str, context_text: Opti
                 processed_query = quick_queries[quick_action]
             else:
                 processed_query = chat_query
-
             if processed_query:
                 with st.spinner("Ustaad Jee is thinking..."):
                     try:
@@ -1352,7 +1219,6 @@ def create_translation_and_chat_interface(document_text: str, context_text: Opti
                             context_text=context_text,
                             document_text=document_text
                         )
-
                         chat_entry = {
                             "query": quick_action if quick_action != "Quick Action" else chat_query,
                             "response": response,
@@ -1360,7 +1226,6 @@ def create_translation_and_chat_interface(document_text: str, context_text: Opti
                             "type": "quick_action" if quick_action != "Quick Action" else "question",
                             "timestamp": time.time()
                         }
-
                         st.session_state.chat_history.append(chat_entry)
                         store_chat_history(st.session_state.user_info['localId'], chat_entry)
                         st.rerun()
@@ -1368,7 +1233,6 @@ def create_translation_and_chat_interface(document_text: str, context_text: Opti
                         st.error(f"Error: {str(e)}")
             else:
                 st.warning("Please enter a question or select an action!")
-
 
 def create_usage_tips():
     with st.expander("How to Use Ustaad Jee"):
@@ -1386,7 +1250,6 @@ def create_usage_tips():
         - **Languages**: Ustaad Jee can teach in English, Urdu, or Roman Urdu!
         - **Translation**: Click 'Start Translation' to translate the entire document.
         """)
-
 
 def create_sample_data():
     with st.expander("Sample Data"):
@@ -1419,7 +1282,6 @@ def create_sample_data():
                                   {"english_term": eng, "urdu_term": urdu})
                 st.rerun()
 
-
 def create_footer():
     st.markdown("---")
     st.markdown(
@@ -1427,9 +1289,7 @@ def create_footer():
         unsafe_allow_html=True
     )
 
-
 def main():
-
     st.markdown("""
         <style>
         @import url('https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&display=swap');
@@ -1449,7 +1309,7 @@ def main():
         }
         .title-text {
             font-family: 'Aladin', 'Matura MT Script Capitals', cursive !important;
-            font-size: 6.5rem !important;
+            font-size: 6rem !important;
             font-weight: bold !important;
             background: linear-gradient(90deg, #00B7EB, #50E3C2) !important;
             -webkit-background-clip: text !important;
@@ -1484,7 +1344,6 @@ def main():
         .stButton>button:active {
             transform: translateY(0) !important;
         }
-
         .stTextInput>div>input, .stTextArea>div>textarea {
             border-radius: 10px !important;
             border: 2px solid #00B7EB !important;
@@ -1589,13 +1448,29 @@ def main():
             text-align: center !important;
         }
         .user-avatar { background: #40C4FF !important; }
-        .bot-avatar { background: #50E3C2 !important; }
+        .bot { background: #50E3C2 !important; }
         hr {
             border: none !important;
             border-top: 2px dashed #50E3C2 !important;
             opacity: 0.7 !important;
             margin: 10px 0 !important;
             clear: both !important;
+        }
+        .cute-rating .streamlit-expanderHeader {
+            font-size: 13px !important;
+            padding: 0.2rem 0.5rem !important;
+            background: transparent !important;
+            border: none !important;
+            border-radius: 15px !important;
+        }
+        .cute-rating .streamlit-expanderContent {
+            padding: 0.3rem !important;
+            border: none !important;
+            background: transparent !important;
+        }
+        .cute-rating {
+            border: none !important;
+            background: transparent !important;
         }
         </style>
     """, unsafe_allow_html=True)
@@ -1604,7 +1479,9 @@ def main():
     with col1:
         st.image("dude.png")
     with col2:
-        st.markdown('<h1 class="title-text" style =  margin-top: -8rem , margin-bottom : -5rem ; >Ustaad Jee\'s Knowledge Hub</h1>', unsafe_allow_html=True)
+        st.markdown(
+            '<h1 class="title-text" style="margin-top: 2rem; margin-bottom: -1rem;">Ustaad Jee\'s Knowledge Hub</h1>',
+            unsafe_allow_html=True)
         st.markdown("----")
     init_session_state()
 
@@ -1627,8 +1504,7 @@ def main():
                 password = st.text_input("Confirm Password", type="password")
                 if st.form_submit_button("Delete", use_container_width=True, type="primary"):
                     try:
-                        id_token = sign_in_with_email_and_password(st.session_state.user_info['email'], password)[
-                            'idToken']
+                        id_token = sign_in_with_email_and_password(st.session_state.user_info['email'], password)['idToken']
                         user_id = st.session_state.user_info['localId']
                         delete_user_account(id_token)
                         log_user_activity(user_id, "account_deletion", {"email": st.session_state.user_info['email']})
@@ -1664,10 +1540,8 @@ def main():
         document_text, context_text = create_input_interface()
     with col2:
         create_translation_and_chat_interface(document_text, context_text)
-
     create_usage_tips()
     create_footer()
-
 
 if __name__ == "__main__":
     main()

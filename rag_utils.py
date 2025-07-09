@@ -1,4 +1,4 @@
-#rag_utils
+import hashlib
 import streamlit as st
 import fitz  # PyMuPDF
 import bleach
@@ -18,46 +18,33 @@ from llama_index.core.query_engine import RetrieverQueryEngine
 from llama_index.vector_stores.qdrant import QdrantVectorStore as LlamaQdrantVectorStore
 from llm_utils import CustomLLM
 
-
-# Collection names
-BASE_COLLECTION = "ustaad-jee-base"
-SENTENCE_WINDOW_COLLECTION = "ustaad-jee-sentence-window"
-AUTOMERGING_COLLECTION = "ustaad-jee-automerging"
-
+# Define constants
+KNOWLEDGE_HUB_COLLECTION = "ustaad-jee-knowledge-hub"
 
 def initialize_qdrant() -> bool:
-    """Initialize Qdrant client and required collections"""
     try:
         api_key = st.secrets.get("QDRANT_API_KEY")
         url = st.secrets.get("QDRANT_URL")
         if not api_key or not url:
             st.error("Qdrant API key or URL not found in secrets")
             return False
-
         client = QdrantClient(url=url, api_key=api_key)
         st.session_state["qdrant_client"] = client
-
-        # Create required collections if they don't exist
         collections = client.get_collections()
         existing_collections = [c.name for c in collections.collections]
-
-        for collection_name in [BASE_COLLECTION, SENTENCE_WINDOW_COLLECTION, AUTOMERGING_COLLECTION]:
-            if collection_name not in existing_collections:
-                client.create_collection(
-                    collection_name=collection_name,
-                    vectors_config=VectorParams(size=384, distance=Distance.COSINE)
-                )
-                print(f"Created collection: {collection_name}")
-                time.sleep(1)  # Brief pause between creations
-
+        if KNOWLEDGE_HUB_COLLECTION not in existing_collections:
+            client.create_collection(
+                collection_name=KNOWLEDGE_HUB_COLLECTION,
+                vectors_config=VectorParams(size=384, distance=Distance.COSINE)
+            )
+            print(f"Created collection: {KNOWLEDGE_HUB_COLLECTION}")
+            time.sleep(0.5)
         return True
     except Exception as e:
         st.error(f"Qdrant initialization failed: {str(e)}")
         return False
 
-
 def initialize_embeddings() -> bool:
-    """Initialize HuggingFace embeddings"""
     try:
         embeddings = HuggingFaceEmbeddings(
             model_name="sentence-transformers/all-MiniLM-L6-v2",
@@ -71,9 +58,7 @@ def initialize_embeddings() -> bool:
         st.error(f"Embeddings initialization failed: {str(e)}")
         return False
 
-
 def initialize_llm() -> bool:
-    """Initialize LLM for LlamaIndex"""
     try:
         if "llm" in st.session_state and st.session_state["llm"]:
             Settings.llm = CustomLLM(st.session_state["llm"])
@@ -84,9 +69,7 @@ def initialize_llm() -> bool:
         st.error(f"LLM initialization failed: {str(e)}")
         return False
 
-
 def initialize_components():
-    """Initialize all components for RAG functionality"""
     try:
         if not initialize_qdrant():
             return False
@@ -99,16 +82,22 @@ def initialize_components():
         st.error(f"Component initialization failed: {str(e)}")
         return False
 
+def ensure_rag_initialized() -> bool:
+    if "rag_initialized" not in st.session_state:
+        if initialize_components():
+            st.session_state["rag_initialized"] = True
+            print("RAG system initialized successfully")
+        else:
+            st.session_state["rag_initialized"] = False
+            print("RAG initialization failed")
+    return st.session_state["rag_initialized"]
 
 def parse_document(document: any) -> List[str]:
-    """Parse document into text chunks"""
     try:
         if isinstance(document, str):
             text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
             return text_splitter.split_text(document)
-
         if hasattr(document, 'read'):
-            # Handle PDF files
             if document.name.endswith(".pdf"):
                 with fitz.open(stream=document.read(), filetype="pdf") as doc:
                     text = ""
@@ -117,326 +106,189 @@ def parse_document(document: any) -> List[str]:
                     cleaned_text = bleach.clean(text, tags=["p", "b", "i", "strong", "em"], strip=True)
                     text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
                     return text_splitter.split_text(cleaned_text)
-
-            # Handle text files
             elif document.name.endswith(".txt"):
                 text = document.read().decode("utf-8")
                 cleaned_text = bleach.clean(text, tags=["p", "b", "i", "strong", "em"], strip=True)
                 text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
                 return text_splitter.split_text(cleaned_text)
-
         raise ValueError("Unsupported document type")
     except Exception as e:
         st.error(f"Error parsing document: {str(e)}")
         raise
 
-
-def store_base_chunks(text_chunks: List[str]):
-    """Store base text chunks in Qdrant"""
+def store_base_chunks(text_chunks: List[str], source: str = "knowledge_hub"):
     try:
         client = st.session_state["qdrant_client"]
         embeddings = st.session_state["embeddings"]
-
-        # Generate embeddings in batch
         vectors = [embeddings.embed_query(chunk) for chunk in text_chunks]
-
-        # Prepare points for upsert
         points = [
             PointStruct(
-                id=idx,
+                id=hashlib.md5(f"{source}_{idx}_{time.time()}".encode()).hexdigest(),
                 vector=vector,
-                payload={"text": text}
+                payload={"text": text, "source": source}
             )
             for idx, (text, vector) in enumerate(zip(text_chunks, vectors))
         ]
-
-        # Upsert to Qdrant
         client.upsert(
-            collection_name=BASE_COLLECTION,
+            collection_name=KNOWLEDGE_HUB_COLLECTION,
             points=points,
             wait=True
         )
-
-        print(f"Stored {len(points)} base chunks in Qdrant")
+        print(f"Stored {len(points)} chunks in {KNOWLEDGE_HUB_COLLECTION}")
         return True
     except Exception as e:
-        st.error(f"Error storing base chunks: {str(e)}")
+        st.error(f"Error storing chunks: {str(e)}")
         return False
 
-
-def build_sentence_window_index(document_text: str) -> VectorStoreIndex:
-    """Build sentence window index for advanced RAG"""
+def index_document(document_text: str) -> bool:
     try:
+        if not document_text.strip():
+            st.warning("No document text provided to index")
+            return False
+        if not ensure_rag_initialized():
+            return False
+        text_chunks = parse_document(document_text)
         client = st.session_state["qdrant_client"]
         embeddings = st.session_state["embeddings"]
-
-        # Create vector store
+        # Initialize LlamaIndex Qdrant vector store
         vector_store = LlamaQdrantVectorStore(
             client=client,
-            collection_name=SENTENCE_WINDOW_COLLECTION
+            collection_name=KNOWLEDGE_HUB_COLLECTION
         )
-
-        # Configure node parser
-        node_parser = SentenceWindowNodeParser.from_defaults(
+        storage_context = StorageContext.from_defaults(vector_store=vector_store)
+        documents = [Document(text=chunk) for chunk in text_chunks]
+        # Basic indexing
+        store_base_chunks(text_chunks, source="knowledge_hub")
+        # Sentence Window indexing
+        sentence_node_parser = SentenceWindowNodeParser.from_defaults(
             window_size=3,
             window_metadata_key="window",
             original_text_metadata_key="original_text"
         )
-
-        # Process document
-        document = Document(text=document_text)
-        nodes = node_parser.get_nodes_from_documents([document])
-
-        # Create index
-        storage_context = StorageContext.from_defaults(vector_store=vector_store)
-        index = VectorStoreIndex(
-            nodes,
-            storage_context=storage_context,
-            embed_model=embeddings
+        sentence_nodes = sentence_node_parser.get_nodes_from_documents(documents)
+        sentence_index = VectorStoreIndex(
+            nodes=sentence_nodes,
+            storage_context=storage_context
         )
-
-        return index
-    except Exception as e:
-        st.error(f"Error building sentence window index: {str(e)}")
-        raise
-
-
-def build_automerging_index(document_text: str) -> VectorStoreIndex:
-    """Build auto-merging index for advanced RAG"""
-    try:
-        client = st.session_state["qdrant_client"]
-        embeddings = st.session_state["embeddings"]
-
-        # Create vector store
-        vector_store = LlamaQdrantVectorStore(
-            client=client,
-            collection_name=AUTOMERGING_COLLECTION
-        )
-
-        # Configure node parser
-        node_parser = HierarchicalNodeParser.from_defaults(
+        st.session_state["sentence_window_index"] = sentence_index
+        # Auto-merging indexing
+        automerging_parser = HierarchicalNodeParser.from_defaults(
             chunk_sizes=[2048, 512, 128]
         )
-
-        # Process document
-        document = Document(text=document_text)
-        nodes = node_parser.get_nodes_from_documents([document])
-        leaf_nodes = get_leaf_nodes(nodes)
-
-        # Create index
-        storage_context = StorageContext.from_defaults(vector_store=vector_store)
-        index = VectorStoreIndex(
-            leaf_nodes,
-            storage_context=storage_context,
-            embed_model=embeddings
+        automerging_nodes = automerging_parser.get_nodes_from_documents(documents)
+        automerging_index = VectorStoreIndex(
+            nodes=automerging_nodes,
+            storage_context=storage_context
         )
-
-        return index
-    except Exception as e:
-        st.error(f"Error building auto-merging index: {str(e)}")
-        raise
-
-def index_document(text_or_file: any) -> bool:
-    """Index document with full RAG pipeline"""
-    try:
-        if not initialize_components():
-            return False
-
-        text_chunks = parse_document(text_or_file)
-        if not text_chunks:
-            st.error("No text chunks created from document.")
-            return False
-
-        # Store base chunks
-        if not store_base_chunks(text_chunks):
-            return False
-
-        # Build advanced indexes
-        document_text = "\n".join(text_chunks)
-        st.session_state["sentence_window_index"] = build_sentence_window_index(document_text)
-        st.session_state["automerging_index"] = build_automerging_index(document_text)
-        st.session_state["document_text"] = document_text  # Store the full document text
-        st.session_state["documents_indexed"] = True
-
+        st.session_state["automerging_index"] = automerging_index
+        st.session_state["vectorstore"] = vector_store
+        print("Indexing completed successfully")
         return True
     except Exception as e:
         st.error(f"Error indexing document: {str(e)}")
         return False
 
+def index_knowledge_hub_document(document: any) -> bool:
+    try:
+        text_chunks = parse_document(document)
+        document_text = "\n".join(text_chunks) if isinstance(text_chunks, list) else text_chunks
+        return index_document(document_text)
+    except Exception as e:
+        st.error(f"Error indexing knowledge hub document: {str(e)}")
+        return False
 
 def clear_indexes():
-    """Clear all indexes and vectorstores"""
     try:
         client = st.session_state.get("qdrant_client")
         if client:
-            for collection in [BASE_COLLECTION, SENTENCE_WINDOW_COLLECTION, AUTOMERGING_COLLECTION]:
-                try:
-                    client.delete_collection(collection)
-                    print(f"Deleted collection: {collection}")
-                except Exception as e:
-                    print(f"Error deleting {collection}: {str(e)}")
-
-        # Clear session state
-        for key in ["sentence_window_index", "automerging_index", "document_text", "documents_indexed"]:
-            if key in st.session_state:
-                del st.session_state[key]
-
-        # Clear relevant caches
-        st.cache_data.clear()  # Clear all cached data functions
+            client.delete_collection(KNOWLEDGE_HUB_COLLECTION)
+            client.create_collection(
+                collection_name=KNOWLEDGE_HUB_COLLECTION,
+                vectors_config=VectorParams(size=384, distance=Distance.COSINE)
+            )
+            for key in ["vectorstore", "sentence_window_index", "automerging_index"]:
+                if key in st.session_state:
+                    del st.session_state[key]
+            print(f"Cleared collection: {KNOWLEDGE_HUB_COLLECTION}")
+        return True
     except Exception as e:
         st.error(f"Error clearing indexes: {str(e)}")
-
-
-def has_indexed_documents() -> bool:
-    """Check if documents are indexed"""
-    try:
-        if st.session_state.get("documents_indexed"):
-            return True
-
-        client = st.session_state.get("qdrant_client")
-        if client:
-            collection_info = client.get_collection(BASE_COLLECTION)
-            return collection_info.points_count > 0
-
         return False
-    except:
-        return False
-
-
-def retrieve_relevant_chunks(query: str, top_k: int = 5) -> Tuple[List[str], float]:
-    """Retrieve relevant chunks from Qdrant with confidence score and conversation context"""
-    try:
-        if "qdrant_client" not in st.session_state:
-            return [], 0.0
-
-        client = st.session_state["qdrant_client"]
-        embeddings = st.session_state["embeddings"]
-
-        # Build context from recent conversation history
-        conversation_context = ""
-        if "chat_history" in st.session_state and st.session_state.chat_history:
-            last_3_chats = st.session_state.chat_history[-3:]
-            conversation_context = " ".join(
-                f"Previous Q: {chat['query']} A: {chat['response']}"
-                for chat in last_3_chats
-            )
-
-        # Augment query with context
-        augmented_query = f"{conversation_context} {query}".strip()
-
-        # Generate query embedding
-        query_embedding = embeddings.embed_query(augmented_query)
-
-        # Search Qdrant (always hits the database)
-        results = client.search(
-            collection_name=BASE_COLLECTION,
-            query_vector=query_embedding,
-            limit=top_k,
-            with_payload=True,
-            with_vectors=False
-        )
-
-        if not results:
-            return [], 0.0
-
-        # Extract text and scores
-        chunks = [result.payload["text"] for result in results]
-        scores = [result.score for result in results]
-
-        # Calculate average confidence
-        avg_confidence = sum(scores) / len(scores) if scores else 0.0
-
-        return chunks, avg_confidence
-    except Exception as e:
-        print(f"Retrieval error: {str(e)}")
-        return [], 0.0
-
 
 def generate_response(query: str, context_text: Optional[str] = None, document_text: Optional[str] = None) -> str:
-    """Generate response with hidden retrieval details but proper internal usage"""
     try:
-        # Get current settings
-        chat_language = st.session_state.get("chat_language", "English")
-        has_indexed_docs = st.session_state.get("documents_indexed", False)
-        current_doc_text = document_text if document_text is not None else st.session_state.get("document_text", "")
-
-        # Retrieve from vector store if documents are indexed
-        relevant_chunks = []
-        confidence = 0.0
-        if has_indexed_docs:
-            relevant_chunks, confidence = retrieve_relevant_chunks(query)
-        rag_context = "\n\n".join(relevant_chunks) if relevant_chunks else ""
-
-        # Build internal context markers (not shown to user)
-        internal_context = []
-        if context_text:
-            internal_context.append(f"[CONTEXT: {context_text}]")
-        if rag_context:
-            internal_context.append(f"[RAG_CONTENT: {rag_context}]")
-
-        # Prepare glossary internally (only shown in Urdu responses)
-        internal_glossary = ""
-        if chat_language in ["Urdu", "Roman Urdu"]:
-            glossary = st.session_state.get("glossary", {})
-            if glossary:
-                internal_glossary = "\n".join(f"[GLOSSARY: {eng}={urdu}]" for eng, urdu in glossary.items())
-
-        # Build conversation history internally
-        internal_history = ""
-        if "chat_history" in st.session_state and st.session_state.chat_history:
-            last_3_exchanges = st.session_state.chat_history[-3:]
-            internal_history = "[HISTORY: " + " | ".join(
-                f"Q:{chat['query']} A:{chat['response']}"
-                for chat in last_3_exchanges
-            ) + "]"
-
-        # Select prompt template based on language
-        if chat_language == "Urdu":
-            prompt_template = AppConfig.URDU_CHAT_PROMPT
-        elif chat_language == "Roman Urdu":
-            prompt_template = AppConfig.ROMAN_URDU_CHAT_PROMPT
-        else:
-            if current_doc_text or rag_context:
-                prompt_template = AppConfig.DOCUMENT_FOCUS_PROMPT
-            else:
-                prompt_template = AppConfig.DIRECT_PROMPT
-
-        # Format the prompt with hidden internal markers
-        prompt = prompt_template.format(
-            glossary_section=internal_glossary,
-            document_text=current_doc_text,
-            supplementary_info="\n".join(internal_context),
-            question=query,
-            conversation_history=internal_history,
-            confidence_score=f"{confidence:.2f}",
-            source_lang="English",
-            target_lang=chat_language,
-            context_section="",  # Not shown to user
-            text=current_doc_text
-        )
-
-        # Generate clean response (no internal markers shown)
-        response = st.session_state["llm"].generate(prompt=prompt, temperature=0.3)
-
-        # Clean up any accidental internal markers
-        response = response.split("]")[-1].split("[")[0].strip()
-
-        # Special handling for empty responses
-        if not response.strip() or "document doesn't cover" in response.lower():
-            if rag_context:
-                return "Here's what I found about this topic..."
-            return "I couldn't find information about that in my resources."
-
+        if not query.strip():
+            return "Please provide a valid query."
+        client = st.session_state["qdrant_client"]
+        embeddings = st.session_state["embeddings"]
+        llm = st.session_state["llm"]
+        vector_store = st.session_state.get("vectorstore")
+        response = ""
+        # Check if vector store and indexes are available
+        if vector_store and ("sentence_window_index" in st.session_state or "automerging_index" in st.session_state):
+            try:
+                # Use sentence window retriever if available
+                if "sentence_window_index" in st.session_state:
+                    sentence_retriever = st.session_state["sentence_window_index"].as_retriever(
+                        similarity_top_k=3
+                    )
+                    sentence_query_engine = RetrieverQueryEngine(
+                        retriever=sentence_retriever,
+                        node_postprocessors=[
+                            MetadataReplacementPostProcessor(target_metadata_key="window"),
+                            SentenceTransformerRerank(top_n=2, model="cross-encoder/ms-marco-MiniLM-L-6-v2")
+                        ]
+                    )
+                    sentence_response = sentence_query_engine.query(query)
+                    response = str(sentence_response)
+                    print("Used sentence window retriever")
+                # Fall back to auto-merging retriever
+                elif "automerging_index" in st.session_state:
+                    base_retriever = st.session_state["automerging_index"].as_retriever(
+                        similarity_top_k=6
+                    )
+                    retriever = AutoMergingRetriever(
+                        base_retriever=base_retriever,
+                        vector_store=vector_store,
+                        similarity_top_k=3
+                    )
+                    query_engine = RetrieverQueryEngine.from_args(
+                        retriever=retriever,
+                        node_postprocessors=[
+                            SentenceTransformerRerank(top_n=2, model="cross-encoder/ms-marco-MiniLM-L-6-v2")
+                        ]
+                    )
+                    response = str(query_engine.query(query))
+                    print("Used auto-merging retriever")
+            except Exception as e:
+                st.warning(f"Advanced retrieval failed: {str(e)}. Falling back to basic retrieval.")
+                response = ""
+        # Basic retrieval if advanced retrieval fails or is not available
+        if not response:
+            try:
+                query_vector = embeddings.embed_query(query)
+                search_results = client.search(
+                    collection_name=KNOWLEDGE_HUB_COLLECTION,
+                    query_vector=query_vector,
+                    limit=3,
+                    with_payload=True
+                )
+                retrieved_texts = [hit.payload.get("text", "") for hit in search_results]
+                context = "\n".join(retrieved_texts)
+                if context_text:
+                    context += "\n" + context_text
+                if document_text:
+                    context += "\n" + document_text
+                response = llm.generate(
+                    prompt=f"Answer the following question based on the provided context:\n\nQuestion: {query}\n\nContext: {context}",
+                    max_tokens=500,
+                    temperature=0.7
+                )
+                print("Used basic retrieval")
+            except Exception as e:
+                st.error(f"Basic retrieval failed: {str(e)}")
+                response = "Error retrieving response. Please try again."
         return response
     except Exception as e:
-        return f"Error generating response: {str(e)}"
-
-
-# Auto-initialize RAG system
-if "rag_initialized" not in st.session_state:
-    if initialize_components():
-        st.session_state["rag_initialized"] = True
-        print("RAG system initialized successfully")
-    else:
-        st.session_state["rag_initialized"] = False
-        print("RAG initialization failed")
+        st.error(f"Error generating response: {str(e)}")
+        return "An error occurred while generating the response."
