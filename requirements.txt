@@ -1,31 +1,41 @@
+# Core Streamlit and web framework
 streamlit>=1.19.0
+
+# LLM and AI libraries
 openai~=1.86.0
-requests~=2.32.4
-firebase-admin~=6.9.0
-python-jose[cryptography]
-python-dotenv~=1.1.0
-pandas~=2.2.3
-bleach~=6.2.0
-
-dotenv~=0.9.9
-auth~=0.5.3
-pymupdf4llm~=0.0.25
-pinecone~=7.3.0
-langchain-text-splitters~=0.3.8
-langchain-openai~=0.3.27
-llama-index-core~=0.12.44
-protobuf~=5.29.5
-
-langchain-text-splitters
-langchain-pinecone
-langchain-openai
-llama-index
-llama-index-llms-openai
-llama-index-embeddings-openai
-pymupdf4llm
-streamlit
-pinecone
-typing-extensions
-PyMuPDF~=1.26.1
 langchain~=0.3.26
 langchain-community~=0.3.26
+langchain-text-splitters~=0.3.8
+langchain-huggingface
+langchain-qdrant
+
+# LlamaIndex
+llama-index-core~=0.12.44
+llama-index-llms-openai
+llama-index-embeddings-openai
+llama-index-vector-stores-qdrant
+
+# Vector database
+qdrant-client
+
+# Document processing
+PyMuPDF~=1.26.1
+pymupdf4llm~=0.0.25
+
+# Firebase
+firebase-admin~=6.9.0
+
+# Authentication and security
+python-jose[cryptography]
+auth~=0.5.3
+bleach~=6.2.0
+
+# Utilities
+requests~=2.32.4
+pandas~=2.2.3
+python-dotenv~=1.1.0
+protobuf~=5.29.5
+typing-extensions
+
+# Environment management
+python-dotenv~=1.1.0
