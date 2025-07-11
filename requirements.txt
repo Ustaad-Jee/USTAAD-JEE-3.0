@@ -8,6 +8,7 @@ langchain-community~=0.3.26
 langchain-text-splitters~=0.3.8
 langchain-huggingface
 langchain-qdrant
+sentence-transformers
 
 # LlamaIndex
 llama-index-core~=0.12.44
