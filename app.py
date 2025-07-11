@@ -128,12 +128,12 @@ def create_auth_interface():
         max-width: 400px;
         margin: 0 auto;
         padding: 0.5rem 1rem;
-        margin-top: -14rem;
+        margin-top: -38rem;
     }
     .auth-title {
         text-align: center;
         color: #1f2937;
-        font-size: 2rem;
+        font-size: 3rem;
         font-weight: 600;
         margin-bottom: 2rem;
     }
