@@ -3,22 +3,21 @@ import streamlit as st
 import fitz  # PyMuPDF
 import bleach
 import time
-from apconfig import AppConfig
-from typing import List, Optional, Tuple
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams, PointStruct
 from langchain_qdrant import QdrantVectorStore
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_huggingface import HuggingFaceEmbeddings
-from llama_index.core.node_parser import SentenceWindowNodeParser, HierarchicalNodeParser, get_leaf_nodes
+from llama_index.core.node_parser import SentenceWindowNodeParser, HierarchicalNodeParser
 from llama_index.core.postprocessor import MetadataReplacementPostProcessor, SentenceTransformerRerank
 from llama_index.core import Document, VectorStoreIndex, StorageContext, Settings
 from llama_index.core.retrievers import AutoMergingRetriever
 from llama_index.core.query_engine import RetrieverQueryEngine
 from llama_index.vector_stores.qdrant import QdrantVectorStore as LlamaQdrantVectorStore
-from llm_utils import CustomLLM
+from llama_index.core import PromptTemplate
+from typing import List, Optional
+from apconfig import AppConfig
 
-# Define constants
 KNOWLEDGE_HUB_COLLECTION = "ustaad-jee-knowledge-hub"
 
 def initialize_qdrant() -> bool:
@@ -61,7 +60,7 @@ def initialize_embeddings() -> bool:
 def initialize_llm() -> bool:
     try:
         if "llm" in st.session_state and st.session_state["llm"]:
-            Settings.llm = CustomLLM(st.session_state["llm"])
+            Settings.llm = st.session_state["llm"]
             return True
         st.error("LLM not initialized. Configure Ustaad Jee's brain first.")
         return False
@@ -102,16 +101,26 @@ def parse_document(document: any) -> List[str]:
                 with fitz.open(stream=document.read(), filetype="pdf") as doc:
                     text = ""
                     for page in doc:
-                        text += page.get_text()
+                        page_text = page.get_text()
+                        if not page_text.strip():
+                            st.warning("No extractable text found on page. This PDF may be scanned or image-based.")
+                        text += page_text
+                    if not text.strip():
+                        raise ValueError("No extractable text found in PDF. Ensure the PDF contains text, not just images.")
                     cleaned_text = bleach.clean(text, tags=["p", "b", "i", "strong", "em"], strip=True)
                     text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
                     return text_splitter.split_text(cleaned_text)
             elif document.name.endswith(".txt"):
                 text = document.read().decode("utf-8")
+                if not text.strip():
+                    raise ValueError("No text found in TXT file. Ensure the file is not empty and uses UTF-8 encoding.")
                 cleaned_text = bleach.clean(text, tags=["p", "b", "i", "strong", "em"], strip=True)
                 text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
                 return text_splitter.split_text(cleaned_text)
         raise ValueError("Unsupported document type")
+    except UnicodeDecodeError:
+        st.error("Failed to decode TXT file. Ensure it is encoded in UTF-8.")
+        raise
     except Exception as e:
         st.error(f"Error parsing document: {str(e)}")
         raise
@@ -150,16 +159,13 @@ def index_document(document_text: str) -> bool:
         text_chunks = parse_document(document_text)
         client = st.session_state["qdrant_client"]
         embeddings = st.session_state["embeddings"]
-        # Initialize LlamaIndex Qdrant vector store
         vector_store = LlamaQdrantVectorStore(
             client=client,
             collection_name=KNOWLEDGE_HUB_COLLECTION
         )
         storage_context = StorageContext.from_defaults(vector_store=vector_store)
         documents = [Document(text=chunk) for chunk in text_chunks]
-        # Basic indexing
         store_base_chunks(text_chunks, source="knowledge_hub")
-        # Sentence Window indexing
         sentence_node_parser = SentenceWindowNodeParser.from_defaults(
             window_size=3,
             window_metadata_key="window",
@@ -171,7 +177,6 @@ def index_document(document_text: str) -> bool:
             storage_context=storage_context
         )
         st.session_state["sentence_window_index"] = sentence_index
-        # Auto-merging indexing
         automerging_parser = HierarchicalNodeParser.from_defaults(
             chunk_sizes=[2048, 512, 128]
         )
@@ -215,7 +220,42 @@ def clear_indexes():
         st.error(f"Error clearing indexes: {str(e)}")
         return False
 
-def generate_response(query: str, context_text: Optional[str] = None, document_text: Optional[str] = None) -> str:
+def translate_glossary_terms(response: str, chat_language: str) -> str:
+    glossary = st.session_state.get("glossary", {})
+    if not glossary:
+        return response
+
+    # Simple mapping for common terms (extend as needed)
+    transliteration_map = {
+        "document": {"English": "document", "Urdu": "دستاویز", "Roman Urdu": "dastaveez"},
+        "file": {"English": "file", "Urdu": "فائل", "Roman Urdu": "file"},
+        "data": {"English": "data", "Urdu": "ڈیٹا", "Roman Urdu": "data"},
+        "information": {"English": "information", "Urdu": "معلومات", "Roman Urdu": "maloomat"},
+        "question": {"English": "question", "Urdu": "سوال", "Roman Urdu": "sawal"},
+    }
+
+    # Update session state glossary with predefined terms if not already present
+    for term, translations in transliteration_map.items():
+        if term not in glossary:
+            glossary[term] = translations
+    st.session_state.glossary = glossary
+
+    # Replace glossary terms with the appropriate language variant
+    for term, translations in glossary.items():
+        source_term = translations.get("English", term)  # Default to English
+        target_term = translations.get(chat_language, source_term)
+        # Case-insensitive replacement to handle variations
+        import re
+        response = re.sub(rf'\b{re.escape(source_term)}\b', target_term, response, flags=re.IGNORECASE)
+        if chat_language != "English":
+            # Also replace Urdu terms if chat_language is Roman Urdu, and vice versa
+            other_language = "Urdu" if chat_language == "Roman Urdu" else "Roman Urdu"
+            other_term = translations.get(other_language, source_term)
+            response = re.sub(rf'\b{re.escape(other_term)}\b', target_term, response, flags=re.IGNORECASE)
+
+    return response
+
+def generate_response(query: str, chat_language: str, context_text: Optional[str] = None, document_text: Optional[str] = None) -> str:
     try:
         if not query.strip():
             return "Please provide a valid query."
@@ -224,10 +264,26 @@ def generate_response(query: str, context_text: Optional[str] = None, document_t
         llm = st.session_state["llm"]
         vector_store = st.session_state.get("vectorstore")
         response = ""
-        # Check if vector store and indexes are available
+        glossary_section = "\n".join([
+            f"{term}: {translations[chat_language] if chat_language in translations else translations['English']}"
+            for term, translations in st.session_state.get("glossary", {}).items()
+        ])
+        qa_prompt = PromptTemplate(
+            AppConfig.DOCUMENT_FOCUS_PROMPT.format(
+                language=chat_language,
+                conversation_history="\n".join([f"Q: {chat['query']}\nA: {chat['response']}" for chat in st.session_state.get("chat_history", [])]),
+                document_text=document_text or "",
+                rag_context="{context_str}",
+                supplementary_info="",
+                glossary_section=glossary_section,
+                glossary_translation_rules=AppConfig.GLOSSARY_TRANSLATION_RULES,
+                allow_llm_knowledge="False",
+                confidence_score="0.9",
+                question=query
+            )
+        )
         if vector_store and ("sentence_window_index" in st.session_state or "automerging_index" in st.session_state):
             try:
-                # Use sentence window retriever if available
                 if "sentence_window_index" in st.session_state:
                     sentence_retriever = st.session_state["sentence_window_index"].as_retriever(
                         similarity_top_k=3
@@ -237,12 +293,12 @@ def generate_response(query: str, context_text: Optional[str] = None, document_t
                         node_postprocessors=[
                             MetadataReplacementPostProcessor(target_metadata_key="window"),
                             SentenceTransformerRerank(top_n=2, model="cross-encoder/ms-marco-MiniLM-L-6-v2")
-                        ]
+                        ],
+                        text_qa_template=qa_prompt
                     )
                     sentence_response = sentence_query_engine.query(query)
                     response = str(sentence_response)
                     print("Used sentence window retriever")
-                # Fall back to auto-merging retriever
                 elif "automerging_index" in st.session_state:
                     base_retriever = st.session_state["automerging_index"].as_retriever(
                         similarity_top_k=6
@@ -256,14 +312,14 @@ def generate_response(query: str, context_text: Optional[str] = None, document_t
                         retriever=retriever,
                         node_postprocessors=[
                             SentenceTransformerRerank(top_n=2, model="cross-encoder/ms-marco-MiniLM-L-6-v2")
-                        ]
+                        ],
+                        text_qa_template=qa_prompt
                     )
                     response = str(query_engine.query(query))
                     print("Used auto-merging retriever")
             except Exception as e:
                 st.warning(f"Advanced retrieval failed: {str(e)}. Falling back to basic retrieval.")
                 response = ""
-        # Basic retrieval if advanced retrieval fails or is not available
         if not response:
             try:
                 query_vector = embeddings.embed_query(query)
@@ -279,15 +335,32 @@ def generate_response(query: str, context_text: Optional[str] = None, document_t
                     context += "\n" + context_text
                 if document_text:
                     context += "\n" + document_text
+                prompt = AppConfig.DOCUMENT_FOCUS_PROMPT.format(
+                    language=chat_language,
+                    conversation_history="\n".join([f"Q: {chat['query']}\nA: {chat['response']}" for chat in st.session_state.get("chat_history", [])]),
+                    document_text=document_text or "",
+                    rag_context=context,
+                    supplementary_info="",
+                    glossary_section=glossary_section,
+                    glossary_translation_rules=AppConfig.GLOSSARY_TRANSLATION_RULES,
+                    allow_llm_knowledge="False",
+                    confidence_score="0.9",
+                    question=query
+                )
                 response = llm.generate(
-                    prompt=f"Answer the following question based on the provided context:\n\nQuestion: {query}\n\nContext: {context}",
+                    prompt=prompt,
                     max_tokens=500,
                     temperature=0.7
                 )
                 print("Used basic retrieval")
             except Exception as e:
                 st.error(f"Basic retrieval failed: {str(e)}")
-                response = "Error retrieving response. Please try again."
+                response = f"Error retrieving response in {chat_language}. Please try again."
+        # Translate glossary terms in the response
+        response = translate_glossary_terms(response, chat_language)
+        # Add RTL marker for Urdu
+        if chat_language == "Urdu":
+            response = f"\u200F{response}"
         return response
     except Exception as e:
         st.error(f"Error generating response: {str(e)}")
