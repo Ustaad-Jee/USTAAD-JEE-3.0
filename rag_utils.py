@@ -15,6 +15,7 @@ from llama_index.core.retrievers import AutoMergingRetriever
 from llama_index.core.query_engine import RetrieverQueryEngine
 from llama_index.vector_stores.qdrant import QdrantVectorStore as LlamaQdrantVectorStore
 from llama_index.core import PromptTemplate
+from llm_utils import LLMWrapper, LLMProvider, CustomLLM
 from typing import List, Optional
 from apconfig import AppConfig
 
@@ -60,7 +61,7 @@ def initialize_embeddings() -> bool:
 def initialize_llm() -> bool:
     try:
         if "llm" in st.session_state and st.session_state["llm"]:
-            Settings.llm = st.session_state["llm"]
+            Settings.llm = CustomLLM(st.session_state["llm"])
             return True
         st.error("LLM not initialized. Configure Ustaad Jee's brain first.")
         return False

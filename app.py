@@ -1215,6 +1215,7 @@ def create_translation_and_chat_interface(document_text: str, context_text: Opti
                 with st.spinner("Ustaad Jee is thinking..."):
                     try:
                         response = generate_response(
+                            chat_language=chat_language,
                             query=processed_query,
                             context_text=context_text,
                             document_text=document_text
