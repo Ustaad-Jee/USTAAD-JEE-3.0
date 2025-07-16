@@ -1,6 +1,8 @@
+from typing import Dict, List
+
 class AppConfig:
     """Ustaad Jee's Knowledge Hub Configuration"""
-    MODELS = {
+    MODELS: Dict[str, List[str]] = {
         "OpenAI (GPT)": ["gpt-4o-mini", "gpt-4.1", "gpt-4-turbo", "gpt-4o"],
         "Claude": ["claude-3-sonnet-20240229", "claude-3-opus-20240229", "claude-3-haiku-20240307",
                    "claude-sonnet-4-20250514"],
@@ -8,9 +10,10 @@ class AppConfig:
         "OpenRouter": ["anthropic/claude-3-sonnet", "openai/gpt-4", "meta-llama/llama-2-70b-chat",
                        "deepseek/deepseek-chat", "google/gemini-pro"],
         "Local LLM": ["llama3.2:3b", "llama3.1:8b", "llama3.1:70b", "deepseek-coder:6.7b",
-                      "deepseek-coder:33b", "deepseek-r1:1.5b", "deepseek-r1:7b", "deepseek-r1:14b", "deepseek-r1:32b",
-                      "deepseek-r1:70b", "codellama:7b", "codellama:13b", "codellama:34b", "mistral:7b",
-                      "mistral:instruct", "qwen2.5:7b", "qwen2.5:14b", "qwen2.5:32b", "phi3:mini", "phi3:medium",
+                      "deepseek-coder:33b", "deepseek-r1:1.5b", "deepseek-r1:7b", "deepseek-r1:14b",
+                      "deepseek-r1:32b", "deepseek-r1:70b", "codellama:7b", "codellama:13b",
+                      "codellama:34b", "mistral:7b", "mistral:instruct", "qwen2.5:7b",
+                      "qwen2.5:14b", "qwen2.5:32b", "phi3:mini", "phi3:medium",
                       "gemma2:2b", "gemma2:9b", "gemma2:27b"]
     }
 
@@ -20,7 +23,7 @@ class AppConfig:
     - For Roman Urdu, use transliterated terms (e.g., 'document' -> 'dastaveez') in LTR.
     - For English, use English terms unchanged (e.g., 'document' -> 'document') in LTR.
     - Only translate glossary terms; do not alter the response's primary language.
-    - Preserve English technical terms in their original form, even in Urdu or Roman Urdu responses.
+    - Preserve English technical terms in their original form, even in Urdu or Roman Urdu responses, unless specified in the glossary.
     """
 
     DOCUMENT_FOCUS_PROMPT = """
@@ -96,11 +99,12 @@ class AppConfig:
     4. Explain technical terms from the document with everyday examples.
     5. Keep the original document's meaning accurate but super easy to read.
     6. Use the glossary terms in Urdu as given: {glossary_section}.
-    7. Keep English tech terms in English but explain them in Urdu.
-    8. Add short notes in brackets for tricky concepts from the document.
-    9. Sound warm and friendly, like explaining the document to a curious student.
-    10. Ensure text is formatted for right-to-left (RTL) rendering using Unicode \u200F.
-    11. Do not add information not present in the original document.
+    7. Apply glossary translation rules: {glossary_translation_rules}.
+    8. Keep English tech terms in English but explain them in Urdu.
+    9. Add short notes in brackets for tricky concepts from the document.
+    10. Sound warm and friendly, like explaining the document to a curious student.
+    11. Ensure text is formatted for right-to-left (RTL) rendering using Unicode \u200F.
+    12. Do not add information not present in the original document.
     {context_section}
     DOCUMENT TO TRANSLATE:
     {text}
@@ -116,11 +120,12 @@ class AppConfig:
     4. Explain technical terms from the document with everyday examples.
     5. Keep the original document's meaning accurate but super easy to read.
     6. Use the glossary terms in Roman Urdu as given: {glossary_section}.
-    7. Keep English tech terms in English but explain them in Roman Urdu.
-    8. Add short notes in brackets for tricky concepts from the document.
-    9. Sound warm and friendly, like explaining the document to a curious student.
-    10. Use fun Roman Urdu phrases like "Yeh basically...", "Is ka matlab hai ke...", "Jab aap..."
-    11. Do not add information not present in the original document.
+    7. Apply glossary translation rules: {glossary_translation_rules}.
+    8. Keep English tech terms in English but explain them in Roman Urdu.
+    9. Add short notes in brackets for tricky concepts from the document.
+    10. Sound warm and friendly, like explaining the document to a curious student.
+    11. Use fun Roman Urdu phrases like "Yeh basically...", "Is ka matlab hai ke...", "Jab aap..."
+    12. Do not add information not present in the original document.
     {context_section}
     DOCUMENT TO TRANSLATE:
     {text}

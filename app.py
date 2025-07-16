@@ -776,20 +776,39 @@ def create_glossary_section():
         urdu_term = bleach.clean(urdu_term) if urdu_term else ""
     with col3:
         st.write("")
+        language_type = st.selectbox("Term Language", ["Urdu", "Roman Urdu"], key="term_language")
         if st.button("+ Add", key="add_term_btn"):
             if english_term and urdu_term:
-                st.session_state.glossary[english_term] = urdu_term
-                st.success(f"Added: {english_term} → {urdu_term}")
+                # Create a dictionary for the term with all language variants
+                term_dict = {
+                    "English": english_term,
+                    "Urdu": urdu_term if language_type == "Urdu" else "",
+                    "Roman Urdu": urdu_term if language_type == "Roman Urdu" else ""
+                }
+                st.session_state.glossary[english_term] = term_dict
+                st.success(f"Added: {english_term} → {urdu_term} ({language_type})")
                 log_user_activity(st.session_state.user_info['localId'], "add_glossary_term",
-                                  {"english_term": english_term, "urdu_term": urdu_term})
+                                  {"english_term": english_term, "urdu_term": urdu_term, "language": language_type})
                 st.rerun()
             else:
                 st.warning("Both terms are required!")
 
     if st.session_state.glossary:
+        # Convert any legacy string entries to dictionary format
+        for eng, term in list(st.session_state.glossary.items()):
+            if isinstance(term, str):
+                st.session_state.glossary[eng] = {
+                    "English": eng,
+                    "Urdu": term if term else "",
+                    "Roman Urdu": ""
+                }
+
         glossary_df = pd.DataFrame([
-            {"English Term": eng, "Urdu Term": urdu}
-            for eng, urdu in st.session_state.glossary.items()
+            {
+                "English Term": eng,
+                "Urdu Term": term_dict.get("Urdu", term_dict.get("Roman Urdu", ""))
+            }
+            for eng, term_dict in st.session_state.glossary.items()
         ])
         csv_buffer = io.StringIO()
         glossary_df.to_csv(csv_buffer, index=False)
@@ -836,8 +855,13 @@ def create_glossary_section():
                         english_term = bleach.clean(english_term)
                         urdu_term = bleach.clean(urdu_term)
                         if english_term and urdu_term and english_term != 'nan' and urdu_term != 'nan':
+                            term_dict = {
+                                "English": english_term,
+                                "Urdu": urdu_term,
+                                "Roman Urdu": ""
+                            }
                             if english_term not in st.session_state.glossary or not merge_option:
-                                st.session_state.glossary[english_term] = urdu_term
+                                st.session_state.glossary[english_term] = term_dict
                                 added_count += 1
                             else:
                                 skipped_count += 1
@@ -861,12 +885,13 @@ def create_glossary_section():
 
     if st.session_state.glossary:
         st.markdown("**Current Glossary**")
-        for idx, (eng, urdu) in enumerate(st.session_state.glossary.items()):
+        for idx, (eng, term_dict) in enumerate(st.session_state.glossary.items()):
             col_eng, col_urdu, col_action = st.columns([2, 2, 1])
             with col_eng:
                 st.write(f"**{eng}**")
             with col_urdu:
-                st.write(urdu)
+                term_display = term_dict.get("Urdu", term_dict.get("Roman Urdu", ""))
+                st.write(term_display)
             with col_action:
                 if st.button("Remove", key=f"remove_{idx}", help="Remove this term"):
                     del st.session_state.glossary[eng]
@@ -903,13 +928,19 @@ class FeedbackDB:
         except Exception as e:
             st.error(f"Error saving feedback: {str(e)}")
 
-def create_input_interface(admin_only: bool = False) -> Tuple[Optional[str], str]:
-    if 'document_hash' not in st.session_state:
-        st.session_state.document_hash = ""
-    if 'document_indexed' not in st.session_state:
-        st.session_state.document_indexed = False
 
-    document_text = None
+def create_input_interface(admin_only: bool = False) -> Tuple[Optional[str], str]:
+    # Initialize session state
+    for key, default in [
+        ('document_hash', ''),
+        ('document_indexed', False),
+        ('uploaded_document', ''),
+        ('context_text', '')
+    ]:
+        if key not in st.session_state:
+            st.session_state[key] = default
+
+    # Document upload
     st.markdown("### Upload Document")
     uploaded_document = st.file_uploader(
         "Upload Document",
@@ -917,82 +948,106 @@ def create_input_interface(admin_only: bool = False) -> Tuple[Optional[str], str
         help="Upload a text or PDF file for Ustaad Jee to process.",
         key="main_document_upload"
     )
-    document_text_str = st.session_state.get('uploaded_document', '')
+    MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB
+    if uploaded_document and uploaded_document.size > MAX_FILE_SIZE:
+        st.error("File exceeds 10MB limit.")
+        uploaded_document = None
+
+    # Process uploaded document and update text area
     if uploaded_document:
         try:
-            document_text = parse_document(uploaded_document)
-            new_text = "\n".join(document_text) if isinstance(document_text, list) else document_text
-            new_text = bleach.clean(new_text, tags=[], strip=True)
-            new_hash = hashlib.md5(new_text.encode()).hexdigest()
+            uploaded_document.seek(0)
+            document_chunks = cached_parse_document(uploaded_document)
+            document_text = "\n".join(document_chunks) if isinstance(document_chunks, list) else document_chunks
+            if not document_text.strip():
+                st.error(f"No extractable text in '{uploaded_document.name}'.")
+                document_text = ""
+            document_text = bleach.clean(document_text, tags=[], strip=True)
+            # Update text area content directly
+            st.session_state.uploaded_document = document_text
+            new_hash = hashlib.md5(document_text.encode()).hexdigest()
             if new_hash != st.session_state.document_hash:
-                st.session_state.uploaded_document = new_text
                 st.session_state.document_hash = new_hash
                 st.session_state.document_indexed = False
                 if st.session_state.get('user_info'):
                     log_user_activity(
                         st.session_state.user_info['localId'],
                         "upload_document",
-                        {"document_length": len(new_text), "document_name": uploaded_document.name}
+                        {"document_length": len(document_text), "document_name": uploaded_document.name}
                     )
-                st.success("Document uploaded and parsed successfully!")
+                st.success(f"Uploaded '{uploaded_document.name}' and loaded into text area.")
             else:
-                st.info("Document content unchanged - using existing version")
+                st.info("Document unchanged.")
         except Exception as e:
-            st.error(f"Failed to parse document: {str(e)}")
+            st.error(f"Failed to parse '{uploaded_document.name}': {str(e)}")
+            st.session_state.uploaded_document = ""
+            document_text = ""
 
+    # Text area for document input (single source of truth)
     document_text_str = st.text_area(
-        "Or Paste Your Document Here",
-        value=document_text_str,
+        "Paste or Edit Document",
+        value=st.session_state.uploaded_document,
         height=300,
-        placeholder="Paste your document text here...",
-        help="Type or paste the document for Ustaad Jee.",
+        placeholder="Paste or edit document text here...",
+        help="Content from uploaded files appears here. Edit or paste text directly.",
         key="main_document_text_input"
     )
+
+    # Update session state if text area changes
     if document_text_str:
         new_hash = hashlib.md5(document_text_str.encode()).hexdigest()
         if new_hash != st.session_state.document_hash:
             st.session_state.uploaded_document = document_text_str
             st.session_state.document_hash = new_hash
             st.session_state.document_indexed = False
+            if st.session_state.get('user_info') and not uploaded_document:  # Log only manual edits
+                log_user_activity(
+                    st.session_state.user_info['localId'],
+                    "edit_document_text",
+                    {"document_length": len(document_text_str)}
+                )
 
+    # Sanitize and parse final document text
     document_text_str = bleach.clean(document_text_str.strip(), tags=[], strip=True) if document_text_str else ""
     st.session_state.uploaded_document = document_text_str
     document_text = parse_document(document_text_str) if document_text_str else None
 
+    # Qdrant indexing (admin only)
     if document_text and st.session_state.get('is_admin', False):
         if st.session_state.document_indexed:
-            st.success("✅ Document already indexed to Qdrant vector database!")
-        else:
-            if st.button("Index Document to Qdrant Vector Database", key="main_index_doc_btn", type="primary"):
-                try:
-                    with st.spinner("Indexing document to Qdrant..."):
-                        success = index_document(document_text_str)
-                        if success:
-                            st.success("Document indexed successfully to Qdrant vector database!")
-                            st.session_state.document_indexed = True
+            st.success("✅ Document indexed to Qdrant!")
+        elif st.button("Index to Qdrant", key="main_index_doc_btn", type="primary"):
+            try:
+                with st.spinner("Indexing..."):
+                    success = index_document(document_text_str)
+                    if success:
+                        st.success("Indexed successfully!")
+                        st.session_state.document_indexed = True
+                        if st.session_state.get('user_info'):
                             log_user_activity(
                                 st.session_state.user_info['localId'],
                                 "index_document",
                                 {"document_length": len(document_text_str)}
                             )
-                            st.rerun()
-                        else:
-                            st.error("Failed to index document to Qdrant vector database.")
-                except Exception as e:
-                    st.error(f"Error indexing to Qdrant: {str(e)}")
+                        st.rerun()
+                    else:
+                        st.error("Failed to index document.")
+            except Exception as e:
+                st.error(f"Indexing error: {str(e)}")
 
-    st.markdown("### Provide Additional Context")
+    # Context upload
+    st.markdown("### Additional Context (Optional)")
     uploaded_context = st.file_uploader(
-        "Upload Context (Optional)",
+        "Upload Context",
         type=["txt"],
-        help="Upload a text file with additional context for Ustaad Jee.",
+        help="Upload a text file with additional context.",
         key="main_context_upload"
     )
-    context_text = st.session_state.get('context_text', '')
     if uploaded_context:
         try:
-            context_text = parse_document(uploaded_context)
-            context_text = "\n".join(context_text) if isinstance(context_text, list) else context_text
+            uploaded_context.seek(0)
+            context_chunks = cached_parse_document(uploaded_context)
+            context_text = "\n".join(context_chunks) if isinstance(context_chunks, list) else context_chunks
             context_text = bleach.clean(context_text, tags=[], strip=True)
             st.session_state.context_text = context_text
             if st.session_state.get('user_info'):
@@ -1001,20 +1056,23 @@ def create_input_interface(admin_only: bool = False) -> Tuple[Optional[str], str
                     "upload_context",
                     {"context_length": len(context_text)}
                 )
-            st.success("Context uploaded and parsed successfully!")
+            st.success("Context uploaded successfully!")
         except Exception as e:
-            st.error(f"Failed to parse context file: {str(e)}")
+            st.error(f"Failed to parse context: {str(e)}")
+            context_text = ""
 
+    # Context text area
     context_text = st.text_area(
-        "Additional Context (Optional)",
-        value=context_text,
+        "Paste or Edit Context",
+        value=st.session_state.context_text,
         height=200,
-        placeholder="Type or paste additional context here...",
-        help="Provide extra information to guide Ustaad Jee's responses.",
+        placeholder="Type or paste additional context...",
+        help="Extra info for Ustaad Jee.",
         key="main_context_text_input"
     )
     context_text = bleach.clean(context_text.strip(), tags=[], strip=True) if context_text else ""
     st.session_state.context_text = context_text
+
     return document_text_str, context_text
 
 def create_translation_and_chat_interface(document_text: str, context_text: Optional[str] = None) -> None:
@@ -1048,60 +1106,62 @@ def create_translation_and_chat_interface(document_text: str, context_text: Opti
             if document_text and st.session_state.llm:
                 with st.spinner("Translating..."):
                     try:
-                        last_6_exchanges = ""
-                        if st.session_state.chat_history:
-                            last_6_exchanges = "\n".join(
-                                f"Q: {chat['query']}\nA: {chat['response']}"
-                                for chat in st.session_state.chat_history[-6:]
-                            )
+                        glossary = st.session_state.get("glossary", {})
+                        glossary_section = "\n".join([
+                            f"English: {translations.get('English', term)}, Urdu: {translations.get('Urdu', '')}, Roman Urdu: {translations.get('Roman Urdu', '')}"
+                            for term, translations in glossary.items()
+                        ]) if glossary else "No glossary terms available."
+                        last_6_exchanges = "\n".join(
+                            f"Q: {chat['query']}\nA: {chat['response']}"
+                            for chat in st.session_state.chat_history[-6:]
+                        ) if st.session_state.chat_history else ""
+                        context_section = f"Conversation Context:\n{last_6_exchanges}\nSupplementary Info:\n{context_text or ''}"
+                        prompt_template = (
+                            AppConfig.URDU_TRANSLATION_PROMPT if translate_language == "Urdu" else
+                            AppConfig.ROMAN_URDU_TRANSLATION_PROMPT if translate_language == "Roman Urdu" else
+                            AppConfig.DIRECT_PROMPT
+                        )
+                        translation_prompt = prompt_template.format(
+                            language=translate_language,
+                            conversation_history=last_6_exchanges,
+                            glossary_section=glossary_section,
+                            glossary_translation_rules=AppConfig.GLOSSARY_TRANSLATION_RULES,
+                            context_section=context_section,
+                            text=document_text
+                        )
+                        translation = st.session_state.llm.generate(
+                            prompt=translation_prompt,
+                            max_tokens=1000,
+                            temperature=0.3
+                        )
                         if translate_language == "Urdu":
-                            translation = st.session_state.llm.translate_to_urdu(
-                                text=document_text,
-                                glossary=st.session_state.glossary if st.session_state.glossary else None,
-                                context=context_text + "\n\nConversation Context:\n" + last_6_exchanges,
-                                temperature=0.3
-                            )
-                            chat_entry = {
-                                "query": "Translation Request",
-                                "response": translation,
-                                "language": "Urdu",
-                                "type": "translation",
-                                "timestamp": time.time()
-                            }
-                        elif translate_language == "Roman Urdu":
-                            translation = st.session_state.llm.translate_to_roman_urdu(
-                                text=document_text,
-                                glossary=st.session_state.glossary if st.session_state.glossary else None,
-                                context=context_text + "\n\nConversation Context:\n" + last_6_exchanges,
-                                temperature=0.3
-                            )
-                            chat_entry = {
-                                "query": "Translation Request",
-                                "response": translation,
-                                "language": "Roman Urdu",
-                                "type": "roman",
-                                "timestamp": time.time()
-                            }
-                        else:
-                            translation = document_text
-                            chat_entry = {
-                                "query": "Translation Request",
-                                "response": translation,
-                                "language": "English",
-                                "type": "translation",
-                                "timestamp": time.time()
-                            }
-                        st.session_state.chat_history.append(
-                            {"query": chat_entry["query"], "response": chat_entry["response"]})
+                            translation = f"\u200F{translation}"
+                        chat_entry = {
+                            "query": "Translation Request",
+                            "response": translation,
+                            "language": translate_language,
+                            "type": "translation",
+                            "timestamp": time.time()
+                        }
+                        st.session_state.chat_history.append(chat_entry)
                         store_chat_history(st.session_state.user_info['localId'], chat_entry)
                         log_user_activity(st.session_state.user_info['localId'], "translation",
                                           {"language": translate_language, "document_length": len(document_text)})
                         st.success(f"{translate_language} translation completed successfully!")
                         st.rerun()
                     except Exception as e:
-                        st.error(f"Error: {str(e)}")
-            else:
-                st.warning("Please provide a document to translate!")
+                        error_message = f"Error: {str(e)}"
+                        chat_entry = {
+                            "query": "Translation Request",
+                            "response": error_message,
+                            "language": translate_language,
+                            "type": "translation",
+                            "timestamp": time.time()
+                        }
+                        st.session_state.chat_history.append(chat_entry)
+                        store_chat_history(st.session_state.user_info['localId'], chat_entry)
+                        st.error(error_message)
+                        st.rerun()
 
     st.markdown("---")
     st.markdown("**Ustaad Jee's Chat**")
@@ -1218,7 +1278,8 @@ def create_translation_and_chat_interface(document_text: str, context_text: Opti
                             chat_language=chat_language,
                             query=processed_query,
                             context_text=context_text,
-                            document_text=document_text
+                            document_text=document_text,
+                            _glossary_version=st.session_state.get("glossary_version", 0)
                         )
                         chat_entry = {
                             "query": quick_action if quick_action != "Quick Action" else chat_query,
@@ -1229,9 +1290,24 @@ def create_translation_and_chat_interface(document_text: str, context_text: Opti
                         }
                         st.session_state.chat_history.append(chat_entry)
                         store_chat_history(st.session_state.user_info['localId'], chat_entry)
+                        log_user_activity(st.session_state.user_info['localId'], "chat_query",
+                                          {"query": processed_query, "language": chat_language})
                         st.rerun()
                     except Exception as e:
-                        st.error(f"Error: {str(e)}")
+                        error_message = f"Error: {str(e)}"
+                        chat_entry = {
+                            "query": quick_action if quick_action != "Quick Action" else chat_query,
+                            "response": error_message,
+                            "language": chat_language,
+                            "type": "quick_action" if quick_action != "Quick Action" else "question",
+                            "timestamp": time.time()
+                        }
+                        st.session_state.chat_history.append(chat_entry)
+                        store_chat_history(st.session_state.user_info['localId'], chat_entry)
+                        log_user_activity(st.session_state.user_info['localId'], "chat_error",
+                                          {"query": processed_query, "error": str(e)})
+                        st.error(error_message)
+                        st.rerun()
             else:
                 st.warning("Please enter a question or select an action!")
 

@@ -14,7 +14,13 @@ def get_firestore_client():
     except ValueError as e:
         st.error(f"Firestore initialization error: {str(e)}. Ensure Firebase is initialized.")
         raise
-
+def store_chat_history(user_id: str, chat_entry: dict):
+    try:
+        db = firestore.client()
+        chat_entry["timestamp"] = firestore.SERVER_TIMESTAMP
+        db.collection("chat_history").document(user_id).collection("chats").add(chat_entry)
+    except Exception as e:
+        print(f"Error storing chat history: {str(e)}")
 
 def ensure_parent_document_exists(db, collection_name, user_id):
     """Ensure the parent document exists for a given user_id in the specified collection."""
