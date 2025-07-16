@@ -1074,17 +1074,39 @@ def create_input_interface(admin_only: bool = False) -> Tuple[Optional[str], str
     st.session_state.context_text = context_text
 
     return document_text_str, context_text
-
 def create_translation_and_chat_interface(document_text: str, context_text: Optional[str] = None) -> None:
     if not st.session_state.get('user_info'):
         st.warning("Please sign in to use Ustaad Jee!")
         return
 
     st.markdown("<h3>Interact with Ustaad Jee</h3>", unsafe_allow_html=True)
+
+    # Initialize feedback system if not exists
     if 'feedback_db' not in st.session_state:
         st.session_state.feedback_db = FeedbackDB()
+
+    # Initialize chat history if not exists
     if 'chat_history' not in st.session_state:
         st.session_state.chat_history = []
+        try:
+            # Load existing chat history from Firestore
+            user_id = st.session_state.user_info['localId']
+            db = firestore.client()
+            chats_ref = db.collection("chat_history").document(user_id).collection("chats")
+            docs = chats_ref.order_by("timestamp", direction=firestore.Query.DESCENDING).limit(20).stream()
+
+            for doc in docs:
+                chat_data = doc.to_dict()
+                # Convert Firestore timestamp to Python timestamp if needed
+                if hasattr(chat_data['timestamp'], 'timestamp'):
+                    chat_data['timestamp'] = chat_data['timestamp'].timestamp()
+                st.session_state.chat_history.append(chat_data)
+
+            # Sort by timestamp (oldest first)
+            st.session_state.chat_history.sort(key=lambda x: x.get('timestamp', 0))
+        except Exception as e:
+            st.error(f"Error loading chat history: {str(e)}")
+            st.session_state.chat_history = []
 
     col1, col2, col3 = st.columns([2, 2, 1])
     with col1:
@@ -1111,16 +1133,20 @@ def create_translation_and_chat_interface(document_text: str, context_text: Opti
                             f"English: {translations.get('English', term)}, Urdu: {translations.get('Urdu', '')}, Roman Urdu: {translations.get('Roman Urdu', '')}"
                             for term, translations in glossary.items()
                         ]) if glossary else "No glossary terms available."
+
                         last_6_exchanges = "\n".join(
                             f"Q: {chat['query']}\nA: {chat['response']}"
                             for chat in st.session_state.chat_history[-6:]
                         ) if st.session_state.chat_history else ""
+
                         context_section = f"Conversation Context:\n{last_6_exchanges}\nSupplementary Info:\n{context_text or ''}"
+
                         prompt_template = (
                             AppConfig.URDU_TRANSLATION_PROMPT if translate_language == "Urdu" else
                             AppConfig.ROMAN_URDU_TRANSLATION_PROMPT if translate_language == "Roman Urdu" else
                             AppConfig.DIRECT_PROMPT
                         )
+
                         translation_prompt = prompt_template.format(
                             language=translate_language,
                             conversation_history=last_6_exchanges,
@@ -1129,13 +1155,16 @@ def create_translation_and_chat_interface(document_text: str, context_text: Opti
                             context_section=context_section,
                             text=document_text
                         )
+
                         translation = st.session_state.llm.generate(
                             prompt=translation_prompt,
                             max_tokens=1000,
                             temperature=0.3
                         )
+
                         if translate_language == "Urdu":
                             translation = f"\u200F{translation}"
+
                         chat_entry = {
                             "query": "Translation Request",
                             "response": translation,
@@ -1143,11 +1172,11 @@ def create_translation_and_chat_interface(document_text: str, context_text: Opti
                             "type": "translation",
                             "timestamp": time.time()
                         }
+
                         st.session_state.chat_history.append(chat_entry)
                         store_chat_history(st.session_state.user_info['localId'], chat_entry)
                         log_user_activity(st.session_state.user_info['localId'], "translation",
                                           {"language": translate_language, "document_length": len(document_text)})
-                        st.success(f"{translate_language} translation completed successfully!")
                         st.rerun()
                     except Exception as e:
                         error_message = f"Error: {str(e)}"
@@ -1161,83 +1190,96 @@ def create_translation_and_chat_interface(document_text: str, context_text: Opti
                         st.session_state.chat_history.append(chat_entry)
                         store_chat_history(st.session_state.user_info['localId'], chat_entry)
                         st.error(error_message)
-                        st.rerun()
 
     st.markdown("---")
     st.markdown("**Ustaad Jee's Chat**")
+
     if st.session_state.chat_history:
         with st.container(height=550, border=True):
             for i, chat in enumerate(st.session_state.chat_history):
+                # Generate a unique key for each chat message
+                chat_key = f"chat_{i}_{chat.get('timestamp', time.time())}"
+
+                # Format timestamp
                 chat_time = time.strftime("%H:%M", time.localtime(chat.get('timestamp', time.time())))
+
+                # User message
                 st.markdown(
                     f"""
-                    <div class="chat-header" style="justify-content: flex-end;">
-                        <div class="avatar user-avatar">🤗</div>
-                        Student at {chat_time}
+                    <div style="display: flex; justify-content: flex-end; margin-bottom: 5px;">
+                        <div style="margin-right: 8px; font-size: 0.8rem; color: #555;">You at {chat_time}</div>
+                        <div style="width: 24px; height: 24px; border-radius: 50%; background: #40C4FF; 
+                                    display: flex; align-items: center; justify-content: center; color: white;">🤗</div>
                     </div>
-                    <div class="user-bubble">{chat['query']}</div>
+                    <div style="background: linear-gradient(135deg, #40C4FF, #80D8FF); color: white; 
+                                padding: 10px 15px; border-radius: 15px 5px 15px 15px; 
+                                margin-left: auto; max-width: 70%; margin-bottom: 15px; float: right; clear: both;">
+                        {chat['query']}
+                    </div>
                     """,
                     unsafe_allow_html=True
                 )
-                bot_name = "Ustaad Jee" if chat_language in ["Urdu", "Roman Urdu"] else "Ustaad Jee (English)"
+
+                # Bot response
+                bot_name = "Ustaad Jee" if chat['language'] in ["Urdu", "Roman Urdu"] else "Ustaad Jee (English)"
                 st.markdown(
                     f"""
-                    <div class="chat-header">
-                        <div class="avatar bot">🪄</div>
-                        {bot_name} at {chat_time}
+                    <div style="display: flex; align-items: center; margin-bottom: 5px;">
+                        <div style="width: 24px; height: 24px; border-radius: 50%; background: #50E3C2; 
+                                    display: flex; align-items: center; justify-content: center; color: white; margin-right: 8px;">🪄</div>
+                        <div style="font-size: 0.8rem; color: #555;">{bot_name} at {chat_time}</div>
                     </div>
-                    <div class="bot-bubble">{chat['response']}</div>
+                    <div style="background: linear-gradient(135deg, #00B7EB, #50E3C2); color: white; 
+                                padding: 10px 15px; border-radius: 5px 15px 15px 15px; 
+                                margin-right: auto; max-width: 70%; margin-bottom: 15px; float: left; clear: both;">
+                        {chat['response']}
+                    </div>
+                    <div style="clear: both;"></div>
                     """,
                     unsafe_allow_html=True
                 )
-                feedback_key = f"feedback_{i}_{chat.get('timestamp', time.time())}"
-                if feedback_key not in st.session_state or not st.session_state.get(feedback_key, False):
-                    with st.expander("Rate this response", expanded=False):
-                        rating_session_key = f"temp_rating_{feedback_key}"
-                        if rating_session_key not in st.session_state:
-                            st.session_state[rating_session_key] = 0
-                        st.write("How helpful was this response?")
-                        cols = st.columns(5)
-                        for star_num in range(1, 6):
-                            with cols[star_num - 1]:
-                                star_icon = "⭐" if star_num <= st.session_state[rating_session_key] else "☆"
-                                if st.button(
-                                        star_icon,
-                                        key=f"star_{feedback_key}_{star_num}",
-                                        help=f"{star_num} star{'s' if star_num > 1 else ''}",
-                                        use_container_width=True
-                                ):
-                                    st.session_state[rating_session_key] = star_num
-                                    st.rerun()
-                        if st.session_state[rating_session_key] > 0:
-                            submit_col, clear_col = st.columns([3, 1])
-                            with submit_col:
-                                if st.button("Submit Rating", key=f"submit_{feedback_key}", type="primary"):
-                                    try:
-                                        rating_value = str(st.session_state[rating_session_key])
-                                        st.session_state.feedback_db.store_feedback(
-                                            question=str(chat['query']),
-                                            response=str(chat['response']),
-                                            language=str(chat_language),
-                                            rating=rating_value
-                                        )
-                                        st.session_state[feedback_key] = True
-                                        st.session_state[f"final_rating_{feedback_key}"] = st.session_state[rating_session_key]
-                                        del st.session_state[rating_session_key]
-                                        st.success("Thanks for your feedback!")
-                                        st.rerun()
-                                    except Exception as e:
-                                        st.error(f"Error submitting rating: {str(e)}")
-                            with clear_col:
-                                if st.button("Clear", key=f"clear_{feedback_key}"):
-                                    st.session_state[rating_session_key] = 0
-                                    st.rerun()
-                else:
-                    final_rating = st.session_state.get(f"final_rating_{feedback_key}", 0)
-                    with st.expander(f"Your rating: {'⭐' * int(final_rating)}", expanded=False):
-                        st.markdown("*Thank you for your feedback!*")
+
+                # Feedback system
+                feedback_key = f"feedback_{chat_key}"
+                if feedback_key not in st.session_state:
+                    st.session_state[feedback_key] = 0
+
+                with st.expander("Rate this response", expanded=False):
+                    current_rating = st.session_state.get(feedback_key, 0) or 0
+                    cols = st.columns(5)
+
+                    for star_num in range(1, 6):
+                        with cols[star_num - 1]:
+                            if st.button(
+                                    "⭐" if star_num <= current_rating else "☆",
+                                    key=f"{feedback_key}_star_{star_num}",
+                                    help=f"{star_num} star{'s' if star_num > 1 else ''}",
+                                    use_container_width=True
+                            ):
+                                st.session_state[feedback_key] = star_num
+                                st.rerun()
+
+                    if current_rating > 0:
+                        if st.button("Submit Rating", key=f"{feedback_key}_submit", type="primary"):
+                            try:
+                                st.session_state.feedback_db.store_feedback(
+                                    question=chat['query'],
+                                    response=chat['response'],
+                                    language=chat['language'],
+                                    rating=str(current_rating)
+                                )
+                                st.success("Thanks for your feedback!")
+                                time.sleep(1)
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"Error submitting rating: {str(e)}")
+
+                        if st.button("Clear Rating", key=f"{feedback_key}_clear"):
+                            st.session_state[feedback_key] = 0
+                            st.rerun()
+
                 if i < len(st.session_state.chat_history) - 1:
-                    st.markdown("<hr>", unsafe_allow_html=True)
+                    st.markdown("<hr style='border-top: 1px dashed #50E3C2; margin: 15px 0;'>", unsafe_allow_html=True)
     else:
         st.info("Ustaad Jee's Chat is empty. Ask a question to start!")
 
@@ -1260,6 +1302,7 @@ def create_translation_and_chat_interface(document_text: str, context_text: Opti
             )
         with col3:
             send_btn = st.form_submit_button("Send", type="primary", use_container_width=True)
+
         if send_btn:
             if quick_action != "Quick Action":
                 quick_queries = {
@@ -1271,6 +1314,7 @@ def create_translation_and_chat_interface(document_text: str, context_text: Opti
                 processed_query = quick_queries[quick_action]
             else:
                 processed_query = chat_query
+
             if processed_query:
                 with st.spinner("Ustaad Jee is thinking..."):
                     try:
@@ -1281,6 +1325,7 @@ def create_translation_and_chat_interface(document_text: str, context_text: Opti
                             document_text=document_text,
                             _glossary_version=st.session_state.get("glossary_version", 0)
                         )
+
                         chat_entry = {
                             "query": quick_action if quick_action != "Quick Action" else chat_query,
                             "response": response,
@@ -1288,6 +1333,7 @@ def create_translation_and_chat_interface(document_text: str, context_text: Opti
                             "type": "quick_action" if quick_action != "Quick Action" else "question",
                             "timestamp": time.time()
                         }
+
                         st.session_state.chat_history.append(chat_entry)
                         store_chat_history(st.session_state.user_info['localId'], chat_entry)
                         log_user_activity(st.session_state.user_info['localId'], "chat_query",
@@ -1304,10 +1350,7 @@ def create_translation_and_chat_interface(document_text: str, context_text: Opti
                         }
                         st.session_state.chat_history.append(chat_entry)
                         store_chat_history(st.session_state.user_info['localId'], chat_entry)
-                        log_user_activity(st.session_state.user_info['localId'], "chat_error",
-                                          {"query": processed_query, "error": str(e)})
                         st.error(error_message)
-                        st.rerun()
             else:
                 st.warning("Please enter a question or select an action!")
 
