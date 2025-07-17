@@ -22,6 +22,7 @@ from apconfig import AppConfig
 
 KNOWLEDGE_HUB_COLLECTION = "ustaad-jee-knowledge-hub"
 CONVERSATION_CONTEXT_COLLECTION = "ustaad-jee-conversation-context"
+RELEVANCE_THRESHOLD = 0.75  # Configurable relevance threshold
 
 def initialize_qdrant() -> bool:
     """Initialize Qdrant client and create collections"""
@@ -282,8 +283,8 @@ def index_conversation_context(query: str, response: str, conversation_id: str) 
         print(f"Error indexing conversation context: {str(e)}")
         return False
 
-def retrieve_relevant_chunks(query: str, max_chunks: int = 5) -> Dict[str, List[str]]:
-    """Retrieve relevant chunks from both knowledge and conversation context"""
+def retrieve_relevant_chunks(query: str, max_chunks: int = 5) -> Dict[str, List[Dict]]:
+    """Retrieve relevant chunks with scores from both knowledge and conversation context"""
     try:
         if not st.session_state.get("rag_initialized", False):
             return {"knowledge": [], "context": []}
@@ -313,7 +314,7 @@ def retrieve_relevant_chunks(query: str, max_chunks: int = 5) -> Dict[str, List[
                 )
 
                 knowledge_nodes = knowledge_retriever.retrieve(query)
-                knowledge_chunks = [node.text for node in knowledge_nodes]
+                knowledge_chunks = [{"text": node.text, "score": node.score or 0.0} for node in knowledge_nodes]
             except Exception as e:
                 print(f"Error retrieving knowledge chunks: {str(e)}")
                 # Fallback to basic retrieval without auto-merging
@@ -322,7 +323,7 @@ def retrieve_relevant_chunks(query: str, max_chunks: int = 5) -> Dict[str, List[
                         similarity_top_k=max_chunks
                     )
                     knowledge_nodes = base_knowledge_retriever.retrieve(query)
-                    knowledge_chunks = [node.text for node in knowledge_nodes]
+                    knowledge_chunks = [{"text": node.text, "score": node.score or 0.0} for node in knowledge_nodes]
                 except Exception as e2:
                     print(f"Error with fallback knowledge retrieval: {str(e2)}")
 
@@ -343,7 +344,7 @@ def retrieve_relevant_chunks(query: str, max_chunks: int = 5) -> Dict[str, List[
                 )
 
                 context_nodes = context_retriever.retrieve(query)
-                context_chunks = [node.text for node in context_nodes]
+                context_chunks = [{"text": node.text, "score": node.score or 0.0} for node in context_nodes]
             except Exception as e:
                 print(f"Error retrieving context chunks: {str(e)}")
                 # Fallback to basic retrieval without auto-merging
@@ -352,16 +353,16 @@ def retrieve_relevant_chunks(query: str, max_chunks: int = 5) -> Dict[str, List[
                         similarity_top_k=max_chunks
                     )
                     context_nodes = base_context_retriever.retrieve(query)
-                    context_chunks = [node.text for node in context_nodes]
+                    context_chunks = [{"text": node.text, "score": node.score or 0.0} for node in context_nodes]
                 except Exception as e2:
                     print(f"Error with fallback context retrieval: {str(e2)}")
 
         print(f"Knowledge chunks found: {len(knowledge_chunks)}")
         print(f"Context chunks found: {len(context_chunks)}")
 
-        # Debug: show first few chunks
+        # Debug: show first few chunks with scores
         for i, chunk in enumerate(knowledge_chunks[:2]):
-            print(f"Knowledge chunk {i}: {chunk[:100]}...")
+            print(f"Knowledge chunk {i} (score: {chunk['score']:.3f}): {chunk['text'][:100]}...")
 
         return {"knowledge": knowledge_chunks, "context": context_chunks}
     except Exception as e:
@@ -430,9 +431,10 @@ def clear_indexes():
     except Exception as e:
         st.error(f"Error clearing indexes: {str(e)}")
 
+
 @st.cache_data(show_spinner=False, ttl=3600, max_entries=100, hash_funcs={LLMWrapper: lambda x: id(x)})
 def generate_response(chat_language: str, query: str, context_text: Optional[str], document_text: Optional[str], _glossary_version: int = 0) -> str:
-    """Generate response using RAG with proper context retrieval"""
+    """Generate response using RAG with relevance threshold logic"""
     try:
         if not st.session_state.get("llm"):
             return "Error: LLM not initialized."
@@ -446,15 +448,50 @@ def generate_response(chat_language: str, query: str, context_text: Optional[str
         # Get recent chat history
         last_6_exchanges = "\n".join(
             f"Q: {chat['query']}\nA: {chat['response']}"
-            for chat in st.session_state.get("chat_history", [])[-6:]
+            for chat in st.session_state.get("chat_history", [])[-8:]
         ) if st.session_state.get("chat_history") else ""
 
-        # Retrieve relevant chunks from both knowledge and context
-        retrieved_chunks = retrieve_relevant_chunks(query, max_chunks=5)
-        knowledge_context = "\n".join(retrieved_chunks["knowledge"]) if retrieved_chunks["knowledge"] else "No relevant knowledge chunks found."
-        conversation_context = "\n".join(retrieved_chunks["context"]) if retrieved_chunks["context"] else "No relevant conversation context found."
+        # Check if user is asking about "the document" or "this document"
+        doc_reference_keywords = ["what is this", "what is the doc", "what is this doc", "about this document",
+                                  "this document", "the document", "what's this about", "doc about", "document about"]
+        is_asking_about_current_doc = any(keyword in query.lower() for keyword in doc_reference_keywords)
 
-        # Enhanced context section
+        # If asking about current document and we have document_text, prioritize it
+        if is_asking_about_current_doc and document_text:
+            # Use the current document text directly instead of RAG retrieval
+            knowledge_context = document_text
+            document_relevant = True
+            max_knowledge_score = 1.0  # Perfect relevance for current document
+
+            # Still get conversation context from RAG
+            retrieved_chunks = retrieve_relevant_chunks(query, max_chunks=3)
+            conversation_context = "\n".join(chunk["text"] for chunk in retrieved_chunks["context"]) if retrieved_chunks["context"] else "No relevant conversation context found."
+
+        else:
+            # Normal RAG retrieval for other questions
+            retrieved_chunks = retrieve_relevant_chunks(query, max_chunks=5)
+
+            # Calculate max relevance score from knowledge chunks
+            knowledge_scores = [chunk["score"] for chunk in retrieved_chunks["knowledge"]]
+            max_knowledge_score = max(knowledge_scores) if knowledge_scores else 0.0
+
+            # Determine if document is relevant (threshold = 0.75)
+            document_relevant = max_knowledge_score >= RELEVANCE_THRESHOLD
+
+            # Build context sections
+            knowledge_context = "\n".join(chunk["text"] for chunk in retrieved_chunks["knowledge"]) if retrieved_chunks["knowledge"] else "No relevant knowledge chunks found."
+            conversation_context = "\n".join(chunk["text"] for chunk in retrieved_chunks["context"]) if retrieved_chunks["context"] else "No relevant conversation context found."
+
+        # Store relevance status in session state for UI feedback
+        st.session_state["document_relevant"] = document_relevant
+        st.session_state["max_knowledge_score"] = max_knowledge_score
+
+        # Enhanced context section with relevance warning
+        if document_relevant:
+            document_context_section = knowledge_context
+        else:
+            document_context_section = "⚠️ The uploaded document doesn't appear relevant to this question. Using general knowledge instead."
+
         context_section = f"""
 Recent Conversation History:
 {last_6_exchanges}
@@ -466,16 +503,34 @@ Supplementary Information:
 {context_text or 'No supplementary info provided.'}
 
 Document Knowledge Base:
-{knowledge_context}
+{document_context_section}
 """
 
+        # Language-specific prompt templates
         prompt_template = (
             AppConfig.URDU_CHAT_PROMPT if chat_language == "Urdu" else
             AppConfig.ROMAN_URDU_CHAT_PROMPT if chat_language == "Roman Urdu" else
             AppConfig.ENGLISH_CHAT_PROMPT
         )
 
-        prompt = prompt_template.format(
+        # Add document relevance instruction
+        if is_asking_about_current_doc and document_text:
+            strict_instruction = {
+                "English": "IMPORTANT: The user is asking about the currently uploaded document. Focus entirely on the document content provided.\n\n",
+                "Urdu": "اہم: صارف فی الوقت اپ لوڈ کردہ دستاویز کے بارے میں پوچھ رہا ہے۔ مکمل طور پر فراہم کردہ دستاویزی مواد پر توجہ مرکوز کریں۔\n\n",
+                "Roman Urdu": "Important: User currently upload kiye gaye document ke baare mein pooch raha hai. Bilkul document content par focus karein.\n\n"
+            }[chat_language]
+        else:
+            strict_instruction = {
+                "English": "IMPORTANT: " + ("Focus on document content as it's highly relevant to your question" if document_relevant
+                                            else "The uploaded document appears unrelated to your question. I'll use my general knowledge to help you") + "\n\n",
+                "Urdu": "اہم: " + ("دستاویزی مواد پر توجہ مرکوز کریں کیونکہ یہ آپ کے سوال سے بہت متعلق ہے" if document_relevant
+                                   else "اپ لوڈ کردہ دستاویز آپ کے سوال سے غیر متعلق لگ رہی ہے۔ میں اپنے عمومی علم سے آپ کی مدد کروں گا") + "\n\n",
+                "Roman Urdu": "Important: " + ("document content par dhyan den kyunki yeh aapke sawal se bohat related hai" if document_relevant
+                                               else "upload ki gayi document aapke sawal se unrelated lag rahi hai. Main apne general knowledge se help karunga") + "\n\n"
+            }[chat_language]
+
+        prompt = strict_instruction + prompt_template.format(
             language=chat_language,
             conversation_history=last_6_exchanges,
             document_text=document_text or "No document provided.",
@@ -484,8 +539,8 @@ Document Knowledge Base:
             glossary_section=glossary_section,
             glossary_translation_rules=AppConfig.GLOSSARY_TRANSLATION_RULES,
             question=query,
-            allow_llm_knowledge="False",
-            confidence_score="0.9"
+            allow_llm_knowledge=str(not document_relevant),  # Allow LLM knowledge when doc irrelevant
+            confidence_score=f"{max_knowledge_score:.2f}"
         )
 
         response = st.session_state.llm.generate(

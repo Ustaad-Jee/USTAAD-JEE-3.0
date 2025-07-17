@@ -10,7 +10,7 @@ import hashlib
 import requests
 import json
 from apconfig import AppConfig
-from typing import Optional, Dict, Tuple
+from typing import Optional, Dict, Tuple, List
 from rag_utils import index_document, generate_response, clear_indexes, initialize_components, parse_document, index_knowledge_hub_document
 from enum import Enum
 import os
@@ -75,8 +75,8 @@ def cached_index_document(document_text: str) -> bool:
     return index_document(document_text)
 
 @st.cache_data()
-def cached_retrieve_and_generate(query: str, context_text: str, index_version: int) -> str:
-    return generate_response(query, context_text)
+def cached_retrieve_and_generate(query: str, context_text: str, document_texts: List[str], index_version: int) -> str:
+    return generate_response(query, context_text, document_texts)
 
 def init_session_state():
     if 'llm' not in st.session_state:
@@ -106,7 +106,8 @@ def init_session_state():
         'results': {},
         'glossary_updated': False,
         'chat_history': [],
-        'uploaded_document': "",
+        'uploaded_documents': [],
+        'document_texts': [],
         'context_text': "",
         'auth_warning': "",
         'auth_success': "",
@@ -930,110 +931,101 @@ class FeedbackDB:
 
 
 def create_input_interface(admin_only: bool = False) -> Tuple[Optional[str], str]:
-    # Initialize session state
-    for key, default in [
-        ('document_hash', ''),
-        ('document_indexed', False),
-        ('uploaded_document', ''),
-        ('context_text', '')
-    ]:
-        if key not in st.session_state:
-            st.session_state[key] = default
+    MAX_DOCUMENTS = 3  # Maximum number of documents a user can upload
+
+    # Initialize session state for documents
+    if 'uploaded_documents' not in st.session_state:
+        st.session_state.uploaded_documents = []
+    if 'document_texts' not in st.session_state:
+        st.session_state.document_texts = []
 
     # Document upload
-    st.markdown("### Upload Document")
-    uploaded_document = st.file_uploader(
-        "Upload Document",
+    st.markdown("### Upload Documents")
+    uploaded_documents = st.file_uploader(
+        "Upload Documents (Max 3)",
         type=["txt", "pdf"],
-        help="Upload a text or PDF file for Ustaad Jee to process.",
-        key="main_document_upload"
+        help="Upload up to 3 text or PDF files",
+        key="main_document_upload",
+        accept_multiple_files=True
     )
-    MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB
-    if uploaded_document and uploaded_document.size > MAX_FILE_SIZE:
-        st.error("File exceeds 10MB limit.")
-        uploaded_document = None
 
-    # Process uploaded document and update text area
-    if uploaded_document:
-        try:
-            uploaded_document.seek(0)
-            document_chunks = cached_parse_document(uploaded_document)
-            document_text = "\n".join(document_chunks) if isinstance(document_chunks, list) else document_chunks
-            if not document_text.strip():
-                st.error(f"No extractable text in '{uploaded_document.name}'.")
-                document_text = ""
-            document_text = bleach.clean(document_text, tags=[], strip=True)
-            # Update text area content directly
-            st.session_state.uploaded_document = document_text
-            new_hash = hashlib.md5(document_text.encode()).hexdigest()
-            if new_hash != st.session_state.document_hash:
-                st.session_state.document_hash = new_hash
-                st.session_state.document_indexed = False
-                if st.session_state.get('user_info'):
-                    log_user_activity(
-                        st.session_state.user_info['localId'],
-                        "upload_document",
-                        {"document_length": len(document_text), "document_name": uploaded_document.name}
-                    )
-                st.success(f"Uploaded '{uploaded_document.name}' and loaded into text area.")
-            else:
-                st.info("Document unchanged.")
-        except Exception as e:
-            st.error(f"Failed to parse '{uploaded_document.name}': {str(e)}")
-            st.session_state.uploaded_document = ""
-            document_text = ""
+    # Process new uploads
+    new_documents = []
+    if uploaded_documents:
+        # Limit to first 3 documents
+        for doc in uploaded_documents[:MAX_DOCUMENTS]:
+            if doc not in st.session_state.uploaded_documents:
+                try:
+                    doc.seek(0)
+                    document_chunks = cached_parse_document(doc)
+                    document_text = "\n".join(document_chunks) if isinstance(document_chunks, list) else document_chunks
+                    if not document_text.strip():
+                        st.error(f"No extractable text in '{doc.name}'")
+                    else:
+                        document_text = bleach.clean(document_text, tags=[], strip=True)
+                        new_documents.append((doc, document_text))
+                except Exception as e:
+                    st.error(f"Failed to parse '{doc.name}': {str(e)}")
 
-    # Text area for document input (single source of truth)
-    document_text_str = st.text_area(
-        "Paste or Edit Document",
-        value=st.session_state.uploaded_document,
-        height=300,
-        placeholder="Paste or edit document text here...",
-        help="Content from uploaded files appears here. Edit or paste text directly.",
+    # Update session state with new documents
+    for doc, doc_text in new_documents:
+        st.session_state.uploaded_documents.append(doc)
+        st.session_state.document_texts.append(doc_text)
+        if st.session_state.get('user_info'):
+            log_user_activity(
+                st.session_state.user_info['localId'],
+                "upload_document",
+                {"document_length": len(doc_text), "document_name": doc.name}
+            )
+        st.success(f"Uploaded '{doc.name}' successfully!")
+
+    # Display uploaded documents
+    if st.session_state.uploaded_documents:
+        st.markdown("**Uploaded Documents**")
+        for i, (doc, doc_text) in enumerate(zip(st.session_state.uploaded_documents, st.session_state.document_texts)):
+            col1, col2 = st.columns([4, 1])
+            with col1:
+                st.caption(f"Document {i+1}: {doc.name}")
+                with st.expander(f"View Document {i+1} Content"):
+                    preview = doc_text[:1000] + "..." if len(doc_text) > 1000 else doc_text
+                    st.text_area(f"Content {i+1}", value=preview, height=200, disabled=True)
+            with col2:
+                if st.button("❌", key=f"remove_doc_{i}"):
+                    del st.session_state.uploaded_documents[i]
+                    del st.session_state.document_texts[i]
+                    st.rerun()
+
+    # Text area for manual document input
+    st.markdown("### Or Enter Text Directly")
+    manual_text = st.text_area(
+        "Paste Document Text",
+        height=200,
+        placeholder="Type or paste document text here...",
+        help="Manually add document content",
         key="main_document_text_input"
     )
-
-    # Update session state if text area changes
-    if document_text_str:
-        new_hash = hashlib.md5(document_text_str.encode()).hexdigest()
-        if new_hash != st.session_state.document_hash:
-            st.session_state.uploaded_document = document_text_str
-            st.session_state.document_hash = new_hash
-            st.session_state.document_indexed = False
-            if st.session_state.get('user_info') and not uploaded_document:  # Log only manual edits
+    if manual_text.strip():
+        clean_text = bleach.clean(manual_text.strip(), tags=[], strip=True)
+        if clean_text and clean_text not in st.session_state.document_texts:
+            if len(st.session_state.document_texts) < MAX_DOCUMENTS:
+                st.session_state.document_texts.append(clean_text)
+                st.success("Added manual document text!")
                 log_user_activity(
                     st.session_state.user_info['localId'],
-                    "edit_document_text",
-                    {"document_length": len(document_text_str)}
+                    "add_manual_document",
+                    {"document_length": len(clean_text)}
                 )
+            else:
+                st.warning(f"Maximum {MAX_DOCUMENTS} documents reached")
 
-    # Sanitize and parse final document text
-    document_text_str = bleach.clean(document_text_str.strip(), tags=[], strip=True) if document_text_str else ""
-    st.session_state.uploaded_document = document_text_str
-    document_text = parse_document(document_text_str) if document_text_str else None
-
-    # Qdrant indexing (admin only)
-    if document_text and st.session_state.get('is_admin', False):
-        if st.session_state.document_indexed:
-            st.success("✅ Document indexed to Qdrant!")
-        elif st.button("Index to Qdrant", key="main_index_doc_btn", type="primary"):
-            try:
-                with st.spinner("Indexing..."):
-                    success = index_document(document_text_str)
-                    if success:
-                        st.success("Indexed successfully!")
-                        st.session_state.document_indexed = True
-                        if st.session_state.get('user_info'):
-                            log_user_activity(
-                                st.session_state.user_info['localId'],
-                                "index_document",
-                                {"document_length": len(document_text_str)}
-                            )
-                        st.rerun()
-                    else:
-                        st.error("Failed to index document.")
-            except Exception as e:
-                st.error(f"Indexing error: {str(e)}")
+    # Clear Documents Button
+    if st.session_state.document_texts or st.session_state.context_text:
+        if st.button("🧹 Clear Documents", key="clear_docs_btn", type="secondary"):
+            st.session_state.uploaded_documents = []
+            st.session_state.document_texts = []
+            st.session_state.context_text = ""
+            st.success("Documents cleared!")
+            st.rerun()
 
     # Context upload
     st.markdown("### Additional Context (Optional)")
@@ -1073,11 +1065,28 @@ def create_input_interface(admin_only: bool = False) -> Tuple[Optional[str], str
     context_text = bleach.clean(context_text.strip(), tags=[], strip=True) if context_text else ""
     st.session_state.context_text = context_text
 
-    return document_text_str, context_text
-def create_translation_and_chat_interface(document_text: str, context_text: Optional[str] = None) -> None:
+    return st.session_state.document_texts, context_text
+
+def create_translation_and_chat_interface(document_texts: List[str], context_text: Optional[str] = None) -> None:
     if not st.session_state.get('user_info'):
         st.warning("Please sign in to use Ustaad Jee!")
         return
+
+    # Add CSS for chat container scrolling and thinner buttons
+    st.markdown("""
+    <style>
+    div[data-testid="stVerticalBlock"] > div[style*="height: 550px"] {
+        max-height: 550px;
+        overflow-y: auto;
+        padding: 10px;
+    }
+    .thinner-button button {
+        max-width: 200px;  /* Limit button width */
+        width: 100%;
+        margin: 0 auto 10px auto;  /* Center with vertical spacing */
+    }
+    </style>
+    """, unsafe_allow_html=True)
 
     st.markdown("<h3>Interact with Ustaad Jee</h3>", unsafe_allow_html=True)
 
@@ -1090,7 +1099,7 @@ def create_translation_and_chat_interface(document_text: str, context_text: Opti
         st.session_state.chat_history = []
         try:
             # Load existing chat history from Firestore
-            user_id = st.session_state.user_info['localId']
+            user_id = st.session_state.user_info.get('localId', 'unknown_user')
             db = firestore.client()
             chats_ref = db.collection("chat_history").document(user_id).collection("chats")
             docs = chats_ref.order_by("timestamp", direction=firestore.Query.DESCENDING).limit(20).stream()
@@ -1108,6 +1117,7 @@ def create_translation_and_chat_interface(document_text: str, context_text: Opti
             st.error(f"Error loading chat history: {str(e)}")
             st.session_state.chat_history = []
 
+    # Three-column layout for select boxes and buttons
     col1, col2, col3 = st.columns([2, 2, 1])
     with col1:
         translate_language = st.selectbox(
@@ -1124,10 +1134,15 @@ def create_translation_and_chat_interface(document_text: str, context_text: Opti
             help="Select the language for responses."
         )
     with col3:
-        if st.button("Start Translation", type="primary", help="Translate the entire document"):
-            if document_text and st.session_state.llm:
+        st.markdown('<div class="thinner-button">', unsafe_allow_html=True)
+        if st.button("Translate Document", type="primary", help="Translate the entire document", key="translate_button", use_container_width=True):
+            if document_texts and st.session_state.llm:
                 with st.spinner("Translating..."):
                     try:
+                        # Combine all document texts
+                        combined_text = "\n\n".join(document_texts)
+
+                        user_id = st.session_state.user_info.get('localId', 'unknown_user')
                         glossary = st.session_state.get("glossary", {})
                         glossary_section = "\n".join([
                             f"English: {translations.get('English', term)}, Urdu: {translations.get('Urdu', '')}, Roman Urdu: {translations.get('Roman Urdu', '')}"
@@ -1153,7 +1168,7 @@ def create_translation_and_chat_interface(document_text: str, context_text: Opti
                             glossary_section=glossary_section,
                             glossary_translation_rules=AppConfig.GLOSSARY_TRANSLATION_RULES,
                             context_section=context_section,
-                            text=document_text
+                            text=combined_text
                         )
 
                         translation = st.session_state.llm.generate(
@@ -1174,9 +1189,9 @@ def create_translation_and_chat_interface(document_text: str, context_text: Opti
                         }
 
                         st.session_state.chat_history.append(chat_entry)
-                        store_chat_history(st.session_state.user_info['localId'], chat_entry)
-                        log_user_activity(st.session_state.user_info['localId'], "translation",
-                                          {"language": translate_language, "document_length": len(document_text)})
+                        store_chat_history(user_id, chat_entry)
+                        log_user_activity(user_id, "translation",
+                                          {"language": translate_language, "document_length": len(combined_text)})
                         st.rerun()
                     except Exception as e:
                         error_message = f"Error: {str(e)}"
@@ -1187,12 +1202,75 @@ def create_translation_and_chat_interface(document_text: str, context_text: Opti
                             "type": "translation",
                             "timestamp": time.time()
                         }
-                        st.session_state.chat_history.append(chat_entry)
-                        store_chat_history(st.session_state.user_info['localId'], chat_entry)
+                        user_id = st.session_state.user_info.get('localId', 'unknown_user')
+                        store_chat_history(user_id, chat_entry)
                         st.error(error_message)
+
+        # Single download button for direct download
+        translation_text = next(
+            (chat['response'] for chat in reversed(st.session_state.chat_history)
+             if chat['type'] == 'translation'), ""
+        )
+        if translation_text:
+            try:
+                # Apply RTL mark for Urdu text
+                if translate_language == "Urdu":
+                    translation_text = f"\u200F{translation_text}"
+
+                # Encode as UTF-8 to handle Unicode characters
+                txt_bytes = translation_text.encode('utf-8')
+                st.download_button(
+                    label="download",
+                    data=txt_bytes,
+                    file_name=f"ustaad_translation_{translate_language}.txt",
+                    mime="text/plain",
+                    key="download_translation",
+                    help="Download the latest translation as a text file",
+                    use_container_width=True
+                )
+            except Exception as e:
+                st.error(f"Error generating TXT: {str(e)}")
+        else:
+            st.button(
+                "📥 Download Translation as TXT",
+                key="download_translation",
+                help="No translation available to download",
+                disabled=True,
+                use_container_width=True
+            )
+        st.markdown('</div>', unsafe_allow_html=True)
 
     st.markdown("---")
     st.markdown("**Ustaad Jee's Chat**")
+
+    # Track chat history length for auto-scroll
+    if 'last_chat_length' not in st.session_state:
+        st.session_state.last_chat_length = 0
+
+    current_chat_length = len(st.session_state.chat_history)
+    should_scroll = current_chat_length > st.session_state.last_chat_length
+    st.session_state.last_chat_length = current_chat_length
+
+    def scroll_to_bottom():
+        # Generate a unique dummy variable that changes each time
+        dummy_var = int(time.time() * 1000)  # Use timestamp in milliseconds
+
+        st.markdown(
+            f"""
+            <div id="end-of-chat-{dummy_var}" style="height: 1px;"></div>
+            <script>
+                // The dummy variable MUST be inside the JavaScript
+                var dummy = {dummy_var};
+                
+                // Find and scroll the chat container
+                var chatContainer = window.parent.document.querySelector('div[data-testid="stVerticalBlock"] > div[style*="height: 550px"]');
+                if (chatContainer) {{
+                    chatContainer.scrollTop = chatContainer.scrollHeight;
+                }}
+            </script>
+            """,
+            unsafe_allow_html=True,
+        )
 
     if st.session_state.chat_history:
         with st.container(height=550, border=True):
@@ -1280,6 +1358,10 @@ def create_translation_and_chat_interface(document_text: str, context_text: Opti
 
                 if i < len(st.session_state.chat_history) - 1:
                     st.markdown("<hr style='border-top: 1px dashed #50E3C2; margin: 15px 0;'>", unsafe_allow_html=True)
+
+            # Auto-scroll to bottom only when new messages are added
+            if should_scroll:
+                scroll_to_bottom()
     else:
         st.info("Ustaad Jee's Chat is empty. Ask a question to start!")
 
@@ -1318,11 +1400,12 @@ def create_translation_and_chat_interface(document_text: str, context_text: Opti
             if processed_query:
                 with st.spinner("Ustaad Jee is thinking..."):
                     try:
+                        user_id = st.session_state.user_info.get('localId', 'unknown_user')
                         response = generate_response(
                             chat_language=chat_language,
                             query=processed_query,
                             context_text=context_text,
-                            document_text=document_text,
+                            document_text=document_texts,
                             _glossary_version=st.session_state.get("glossary_version", 0)
                         )
 
@@ -1335,8 +1418,8 @@ def create_translation_and_chat_interface(document_text: str, context_text: Opti
                         }
 
                         st.session_state.chat_history.append(chat_entry)
-                        store_chat_history(st.session_state.user_info['localId'], chat_entry)
-                        log_user_activity(st.session_state.user_info['localId'], "chat_query",
+                        store_chat_history(user_id, chat_entry)
+                        log_user_activity(user_id, "chat_query",
                                           {"query": processed_query, "language": chat_language})
                         st.rerun()
                     except Exception as e:
@@ -1348,12 +1431,11 @@ def create_translation_and_chat_interface(document_text: str, context_text: Opti
                             "type": "quick_action" if quick_action != "Quick Action" else "question",
                             "timestamp": time.time()
                         }
-                        st.session_state.chat_history.append(chat_entry)
-                        store_chat_history(st.session_state.user_info['localId'], chat_entry)
+                        user_id = st.session_state.user_info.get('localId', 'unknown_user')
+                        store_chat_history(user_id, chat_entry)
                         st.error(error_message)
             else:
                 st.warning("Please enter a question or select an action!")
-
 def create_usage_tips():
     with st.expander("How to Use Ustaad Jee"):
         st.markdown("""
@@ -1381,10 +1463,14 @@ def create_sample_data():
         Security measures include password hashing using bcrypt, rate limiting to prevent brute force attacks, and HTTPS encryption for all communications.
         """
         if st.button("Use Sample Document", key="use_sample_doc_btn"):
-            st.session_state.uploaded_document = sample_doc
-            st.success("Sample document loaded!")
-            log_user_activity(st.session_state.user_info['localId'], "load_sample_document", {})
-            st.rerun()
+            if len(st.session_state.document_texts) < 3:
+                st.session_state.document_texts.append(sample_doc)
+                st.success("Sample document loaded!")
+                log_user_activity(st.session_state.user_info['localId'], "load_sample_document", {})
+                st.rerun()
+            else:
+                st.warning("Maximum 3 documents reached")
+
         st.markdown("### Sample Glossary:")
         st.write("Add these terms to Ustaad Jee's glossary:")
         sample_terms = {
@@ -1657,9 +1743,9 @@ def main():
 
     col1, col2 = st.columns([1, 1])
     with col1:
-        document_text, context_text = create_input_interface()
+        document_texts, context_text = create_input_interface()
     with col2:
-        create_translation_and_chat_interface(document_text, context_text)
+        create_translation_and_chat_interface(document_texts, context_text)
     create_usage_tips()
     create_footer()
 
