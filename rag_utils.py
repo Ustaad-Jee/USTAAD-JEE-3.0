@@ -72,7 +72,7 @@ def initialize_embeddings() -> bool:
         Settings.embed_model = embeddings
         return True
     except Exception as e:
-        st.error(f"Embeddings initialization failed: {str(e)}")
+        
         return False
 
 def initialize_llm() -> bool:
