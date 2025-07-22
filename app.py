@@ -328,7 +328,7 @@ def create_auth_interface():
                                 id_token = create_user_with_email_and_password(email, password)['idToken']
                                 user_info = get_account_info(id_token)["users"][0]
                                 send_email_verification(id_token)
-                                st.session_state.auth_success = 'Account created! Check your inbox to verify your email.'
+                                st.session_state.auth_success = 'Account created! Check your inbox to verify your email.Please also check your spam'
                                 log_user_activity(user_info['localId'], "account_creation", {"email": user_info['email']})
                         except requests.exceptions.HTTPError as error:
                             error_message = json.loads(error.args[1])['error']['message']
