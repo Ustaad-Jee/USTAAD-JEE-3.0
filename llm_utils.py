@@ -1,15 +1,16 @@
+# llm_utils.py
 import streamlit as st
 import openai
 import requests
 from enum import Enum
-import json
-from typing import Dict, Optional, Any, Generator
+from typing import Dict, Optional, Any
 from llama_index.core.llms.custom import CustomLLM as BaseLLM
 from llama_index.core.llms import CompletionResponse, CompletionResponseGen, LLMMetadata
 from llama_index.core.callbacks import CallbackManager
 from apconfig import AppConfig
 from abc import ABC, abstractmethod
 import os
+
 
 class LLMProvider(Enum):
     OPENAI = "openai"
@@ -21,10 +22,6 @@ class LLMProvider(Enum):
 class BaseLLMClient(ABC):
     @abstractmethod
     def generate(self, prompt: str, **kwargs) -> str:
-        pass
-
-    @abstractmethod
-    def generate_stream(self, prompt: str, **kwargs) -> Generator[str, None, None]:
         pass
 
 class OpenAIClient(BaseLLMClient):
@@ -46,21 +43,6 @@ class OpenAIClient(BaseLLMClient):
             return response.choices[0].message.content.strip()
         except Exception as e:
             raise Exception(f"OpenAI error: {str(e)}")
-
-    def generate_stream(self, prompt: str, **kwargs) -> Generator[str, None, None]:
-        try:
-            stream = self.client.chat.completions.create(
-                model=self.model,
-                messages=[{"role": "user", "content": prompt}],
-                stream=True,
-                max_tokens=kwargs.get("max_tokens", 2000),
-                temperature=kwargs.get("temperature", 0.3)
-            )
-            for chunk in stream:
-                if chunk.choices[0].delta.content is not None:
-                    yield chunk.choices[0].delta.content
-        except Exception as e:
-            yield f"OpenAI streaming error: {str(e)}"
 
 class ClaudeClient(BaseLLMClient):
     def __init__(self, api_key: str, model: str = "claude-3-sonnet-20240229"):
@@ -87,11 +69,6 @@ class ClaudeClient(BaseLLMClient):
         except Exception as e:
             raise Exception(f"Claude error: {str(e)}")
 
-    def generate_stream(self, prompt: str, **kwargs) -> Generator[str, None, None]:
-        # Claude streaming implementation (placeholder)
-        response = self.generate(prompt, **kwargs)
-        yield response
-
 class DeepSeekClient(BaseLLMClient):
     def __init__(self, api_key: str, model: str = "deepseek-chat"):
         self.api_key = api_key
@@ -116,31 +93,6 @@ class DeepSeekClient(BaseLLMClient):
             return result["choices"][0]["message"]["content"].strip()
         except Exception as e:
             raise Exception(f"DeepSeek error: {str(e)}")
-
-    def generate_stream(self, prompt: str, **kwargs) -> Generator[str, None, None]:
-        try:
-            headers = {
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json"
-            }
-            data = {
-                "model": self.model,
-                "messages": [{"role": "user", "content": prompt}],
-                "max_tokens": kwargs.get("max_tokens", 2000),
-                "temperature": kwargs.get("temperature", 0.3),
-                "stream": True
-            }
-            response = requests.post(self.base_url, headers=headers, json=data, stream=True, timeout=60)
-            response.raise_for_status()
-            for line in response.iter_lines():
-                if line:
-                    decoded_line = line.decode('utf-8')
-                    if decoded_line.startswith('data: '):
-                        data = json.loads(decoded_line[6:])
-                        if data.get('choices') and data['choices'][0].get('delta', {}).get('content'):
-                            yield data['choices'][0]['delta']['content']
-        except Exception as e:
-            yield f"DeepSeek streaming error: {str(e)}"
 
 class OpenRouterClient(BaseLLMClient):
     def __init__(self, api_key: str, model: str = "anthropic/claude-3-sonnet"):
@@ -169,33 +121,6 @@ class OpenRouterClient(BaseLLMClient):
         except Exception as e:
             raise Exception(f"OpenRouter error: {str(e)}")
 
-    def generate_stream(self, prompt: str, **kwargs) -> Generator[str, None, None]:
-        try:
-            headers = {
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json",
-                "HTTP-Referer": kwargs.get("app_url", "https://localhost:8501"),
-                "X-Title": kwargs.get("app_name", "Ustaad Jee")
-            }
-            data = {
-                "model": self.model,
-                "messages": [{"role": "user", "content": prompt}],
-                "max_tokens": kwargs.get("max_tokens", 2000),
-                "temperature": kwargs.get("temperature", 0.3),
-                "stream": True
-            }
-            response = requests.post(self.base_url, headers=headers, json=data, stream=True, timeout=60)
-            response.raise_for_status()
-            for line in response.iter_lines():
-                if line:
-                    decoded_line = line.decode('utf-8')
-                    if decoded_line.startswith('data: '):
-                        data = json.loads(decoded_line[6:])
-                        if data.get('choices') and data['choices'][0].get('delta', {}).get('content'):
-                            yield data['choices'][0]['delta']['content']
-        except Exception as e:
-            yield f"OpenRouter streaming error: {str(e)}"
-
 class LocalLLMClient(BaseLLMClient):
     def __init__(self, base_url: str = "http://localhost:11434", model: str = "llama3.2:3b"):
         self.base_url = base_url.rstrip('/')
@@ -220,28 +145,6 @@ class LocalLLMClient(BaseLLMClient):
         except Exception as e:
             raise Exception(f"Local LLM error: {str(e)}")
 
-    def generate_stream(self, prompt: str, **kwargs) -> Generator[str, None, None]:
-        try:
-            url = f"{self.base_url}/api/generate"
-            data = {
-                "model": self.model,
-                "prompt": prompt,
-                "stream": True,
-                "options": {
-                    "temperature": kwargs.get("temperature", 0.3),
-                    "num_predict": kwargs.get("max_tokens", 2000)
-                }
-            }
-            response = requests.post(url, json=data, stream=True, timeout=120)
-            response.raise_for_status()
-            for line in response.iter_lines():
-                if line:
-                    result = json.loads(line.decode('utf-8'))
-                    if result.get("response"):
-                        yield result["response"]
-        except Exception as e:
-            yield f"Local LLM streaming error: {str(e)}"
-
 class LLMWrapper:
     def __init__(self, provider: LLMProvider = LLMProvider.OPENAI, **config):
         self.provider = provider
@@ -252,6 +155,7 @@ class LLMWrapper:
     def _initialize_client(self) -> None:
         try:
             if self.provider == LLMProvider.OPENAI:
+                # Check st.secrets first, then config, then environment variable
                 api_key = os.getenv("OPENAI_API_KEY") or st.secrets.get("OPENAI_API_KEY")
                 if not api_key:
                     raise Exception("OpenAI API key required! Please set it in Streamlit secrets or provide it manually.")
@@ -294,12 +198,6 @@ class LLMWrapper:
         if not self.client:
             raise Exception("LLM not initialized!")
         return self.client.generate(prompt, **kwargs)
-
-    def generate_stream(self, prompt: str, max_tokens: int = 500, temperature: float = 0.7) -> Generator[str, None, None]:
-        """Generator that streams tokens from the LLM"""
-        if not self.client:
-            raise Exception("LLM not initialized!")
-        return self.client.generate_stream(prompt, max_tokens=max_tokens, temperature=temperature)
 
     def translate_to_urdu(self, text: str, glossary: Optional[Dict[str, str]] = None, context: Optional[str] = None,
                           **kwargs) -> str:
@@ -368,6 +266,7 @@ class LLMWrapper:
 
         return self.generate(prompt, temperature=0.3, max_tokens=2000, **kwargs)
 
+# Custom LLM adapter for llama_index - using BaseLLM instead of OpenAI
 class CustomLLM(BaseLLM):
     def __init__(self, llm_wrapper: LLMWrapper, callback_manager: Optional[CallbackManager] = None):
         super().__init__(callback_manager=callback_manager)
@@ -407,23 +306,9 @@ class CustomLLM(BaseLLM):
             return CompletionResponse(text=f"Error: {str(e)}")
 
     def stream_complete(self, prompt: str, **kwargs) -> CompletionResponseGen:
-        """Stream completion using the LLMWrapper's generate_stream method."""
-        self._call_count += 1
-        if self._call_count > 10:
-            raise Exception(f"Possible recursive call detected in CustomLLM.stream_complete (count: {self._call_count})")
-
-        if not isinstance(prompt, str) or not prompt.strip():
-            print(f"Invalid prompt in CustomLLM.stream_complete: {prompt}")
-            yield CompletionResponse(text="Error: Invalid or empty prompt provided.")
-            return
-
-        print(f"CustomLLM.stream_complete called (count: {self._call_count}) with prompt: {prompt[:50]}...")
-        try:
-            for token in self._llm_wrapper.generate_stream(prompt, **kwargs):
-                yield CompletionResponse(text=token, delta=token)
-        except Exception as e:
-            print(f"Error in CustomLLM.stream_complete: {str(e)}")
-            yield CompletionResponse(text=f"Error: {str(e)}")
+        """Stream completion - for now just return regular completion."""
+        response = self.complete(prompt, **kwargs)
+        yield response
 
     def chat(self, messages: list, **kwargs) -> str:
         self._call_count += 1

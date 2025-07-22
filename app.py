@@ -11,8 +11,7 @@ import requests
 import json
 from apconfig import AppConfig
 from typing import Optional, Dict, Tuple, List
-from rag_utils import index_document, generate_response, clear_indexes, initialize_components, parse_document, \
-    index_knowledge_hub_document, generate_response_stream
+from rag_utils import index_document, generate_response, clear_indexes, initialize_components, parse_document, index_knowledge_hub_document
 from enum import Enum
 import os
 from abc import ABC, abstractmethod
@@ -1073,20 +1072,6 @@ def create_translation_and_chat_interface(document_texts: List[str], context_tex
         st.warning("Please sign in to use Ustaad Jee!")
         return
 
-    # Check and reinitialize LLM if generate_stream is missing
-    if 'llm' in st.session_state and st.session_state['llm'] and not hasattr(st.session_state['llm'], 'generate_stream'):
-        st.warning("LLM instance outdated. Reinitializing...")
-        try:
-            # Reinitialize with default provider (adjust provider/config as needed)
-            st.session_state['llm'] = LLMWrapper(
-                provider=LLMProvider.OPENAI,
-                model="gpt-4o-mini"
-            )
-            st.success("LLM reinitialized successfully.")
-        except Exception as e:
-            st.error(f"Failed to reinitialize LLM: {str(e)}")
-            return
-
     # Add CSS for chat container scrolling and thinner buttons
     st.markdown("""
     <style>
@@ -1096,9 +1081,9 @@ def create_translation_and_chat_interface(document_texts: List[str], context_tex
         padding: 10px;
     }
     .thinner-button button {
-        max-width: 200px;
+        max-width: 200px;  /* Limit button width */
         width: 100%;
-        margin: 0 auto 10px auto;
+        margin: 0 auto 10px auto;  /* Center with vertical spacing */
     }
     </style>
     """, unsafe_allow_html=True)
@@ -1138,19 +1123,19 @@ def create_translation_and_chat_interface(document_texts: List[str], context_tex
         translate_language = st.selectbox(
             label="Translation Language",
             options=["Urdu", "English", "Roman Urdu"],
-            key="translate_language_main",  # Changed key to make it unique
+            key="translate_language",
             help="Select the language for translation."
         )
     with col2:
         chat_language = st.selectbox(
             label="Chat Language",
             options=["English", "Urdu", "Roman Urdu"],
-            key="chat_language_main",  # Changed key to make it unique
+            key="chat_language",
             help="Select the language for responses."
         )
     with col3:
         st.markdown('<div class="thinner-button">', unsafe_allow_html=True)
-        if st.button("Translate Document", type="primary", help="Translate the entire document", key="translate_button_main", use_container_width=True):
+        if st.button("Translate Document", type="primary", help="Translate the entire document", key="translate_button", use_container_width=True):
             if document_texts and st.session_state.llm:
                 with st.spinner("Translating..."):
                     try:
@@ -1235,11 +1220,11 @@ def create_translation_and_chat_interface(document_texts: List[str], context_tex
                 # Encode as UTF-8 to handle Unicode characters
                 txt_bytes = translation_text.encode('utf-8')
                 st.download_button(
-                    label="Download Translation",
+                    label="download",
                     data=txt_bytes,
                     file_name=f"ustaad_translation_{translate_language}.txt",
                     mime="text/plain",
-                    key="download_translation_main",
+                    key="download_translation",
                     help="Download the latest translation as a text file",
                     use_container_width=True
                 )
@@ -1248,7 +1233,7 @@ def create_translation_and_chat_interface(document_texts: List[str], context_tex
         else:
             st.button(
                 "📥 Download Translation as TXT",
-                key="download_translation_disabled_main",
+                key="download_translation",
                 help="No translation available to download",
                 disabled=True,
                 use_container_width=True
@@ -1287,9 +1272,8 @@ def create_translation_and_chat_interface(document_texts: List[str], context_tex
             unsafe_allow_html=True,
         )
 
-    # Chat history display with streaming
-    with st.container(height=550, border=True):
-        if st.session_state.chat_history or st.session_state.is_streaming:
+    if st.session_state.chat_history:
+        with st.container(height=550, border=True):
             for i, chat in enumerate(st.session_state.chat_history):
                 # Generate a unique key for each chat message
                 chat_key = f"chat_{i}_{chat.get('timestamp', time.time())}"
@@ -1333,234 +1317,125 @@ def create_translation_and_chat_interface(document_texts: List[str], context_tex
                     unsafe_allow_html=True
                 )
 
-            # Show streaming response as a chat bubble if streaming is active
-            if st.session_state.is_streaming:
-                current_time = time.strftime("%H:%M", time.localtime(time.time()))
+                # Feedback system
+                feedback_key = f"feedback_{chat_key}"
+                if feedback_key not in st.session_state:
+                    st.session_state[feedback_key] = 0
 
-                # Show user's question first
-                st.markdown(
-                    f"""
-                    <div style="display: flex; justify-content: flex-end; margin-bottom: 5px;">
-                        <div style="margin-right: 8px; font-size: 0.8rem; color: #555;">You at {current_time}</div>
-                        <div style="width: 24px; height: 24px; border-radius: 50%; background: #40C4FF; 
-                                    display: flex; align-items: center; justify-content: center; color: white;">🤗</div>
-                    </div>
-                    <div style="background: linear-gradient(135deg, #40C4FF, #80D8FF); color: white; 
-                                padding: 10px 15px; border-radius: 15px 5px 15px 15px; 
-                                margin-left: auto; max-width: 70%; margin-bottom: 15px; float: right; clear: both;">
-                        {st.session_state.current_query}
-                    </div>
-                    """,
-                    unsafe_allow_html=True
-                )
+                with st.expander("Rate this response", expanded=False):
+                    current_rating = st.session_state.get(feedback_key, 0) or 0
+                    cols = st.columns(5)
 
-                # Show streaming response bubble
-                bot_name = "Ustaad Jee" if st.session_state.current_language in ["Urdu", "Roman Urdu"] else "Ustaad Jee (English)"
-                st.markdown(
-                    f"""
-                    <div style="display: flex; align-items: center; margin-bottom: 5px;">
-                        <div style="width: 24px; height: 24px; border-radius: 50%; background: #50E3C2; 
-                                    display: flex; align-items: center; justify-content: center; color: white; margin-right: 8px;">🪄</div>
-                        <div style="font-size: 0.8rem; color: #555;">{bot_name} at {current_time}</div>
-                    </div>
-                    """,
-                    unsafe_allow_html=True
-                )
-
-                # Streaming response placeholder
-                streaming_placeholder = st.empty()
-
-                try:
-                    full_response = ""
-                    for token in st.session_state.current_stream:
-                        full_response += token
-                        streaming_placeholder.markdown(
-                            f"""
-                            <div style="background: linear-gradient(135deg, #00B7EB, #50E3C2); color: white; 
-                                        padding: 10px 15px; border-radius: 5px 15px 15px 15px; 
-                                        margin-right: auto; max-width: 70%; margin-bottom: 15px; float: left; clear: both;">
-                                {full_response}▌
-                            </div>
-                            <div style="clear: both;"></div>
-                            """,
-                            unsafe_allow_html=True
-                        )
-
-                    # Finalize response without cursor
-                    streaming_placeholder.markdown(
-                        f"""
-                        <div style="background: linear-gradient(135deg, #00B7EB, #50E3C2); color: white; 
-                                    padding: 10px 15px; border-radius: 5px 15px 15px 15px; 
-                                    margin-right: auto; max-width: 70%; margin-bottom: 15px; float: left; clear: both;">
-                            {full_response}
-                        </div>
-                        <div style="clear: both;"></div>
-                        """,
-                        unsafe_allow_html=True
-                    )
-
-                    # Add to chat history
-                    chat_entry = {
-                        "query": st.session_state.current_query,
-                        "response": full_response,
-                        "language": st.session_state.current_language,
-                        "type": st.session_state.current_type,
-                        "timestamp": time.time()
-                    }
-
-                    user_id = st.session_state.user_info.get('localId', 'unknown_user')
-                    st.session_state.chat_history.append(chat_entry)
-                    store_chat_history(user_id, chat_entry)
-                    log_user_activity(user_id, "chat_query", {"query": st.session_state.current_query, "language": st.session_state.current_language})
-
-                    # Reset streaming state
-                    st.session_state.is_streaming = False
-                    st.rerun()
-
-                except Exception as e:
-                    streaming_placeholder.markdown(
-                        f"""
-                        <div style="background: linear-gradient(135deg, #ff6b6b, #ee5a52); color: white; 
-                                    padding: 10px 15px; border-radius: 5px 15px 15px 15px; 
-                                    margin-right: auto; max-width: 70%; margin-bottom: 15px; float: left; clear: both;">
-                            Error: {str(e)}
-                        </div>
-                        <div style="clear: both;"></div>
-                        """,
-                        unsafe_allow_html=True
-                    )
-
-                    # Add error to chat history
-                    chat_entry = {
-                        "query": st.session_state.current_query,
-                        "response": f"Error: {str(e)}",
-                        "language": st.session_state.current_language,
-                        "type": st.session_state.current_type,
-                        "timestamp": time.time()
-                    }
-                    user_id = st.session_state.user_info.get('localId', 'unknown_user')
-                    st.session_state.chat_history.append(chat_entry)
-                    store_chat_history(user_id, chat_entry)
-                    st.session_state.is_streaming = False
-                    st.rerun()
-        else:
-            st.info("Ustaad Jee's Chat is empty. Ask a question to start!")
-
-            # Show feedback system for completed messages (not when streaming)
-            if not st.session_state.is_streaming:
-                for i, chat in enumerate(st.session_state.chat_history):
-                    chat_key = f"chat_{i}_{chat.get('timestamp', time.time())}"
-
-                    # Feedback system
-                    feedback_key = f"feedback_{chat_key}"
-                    if feedback_key not in st.session_state:
-                        st.session_state[feedback_key] = 0
-
-                    with st.expander(f"Rate response {i+1}", expanded=False):
-                        current_rating = st.session_state.get(feedback_key, 0) or 0
-                        cols = st.columns(5)
-
-                        for star_num in range(1, 6):
-                            with cols[star_num - 1]:
-                                if st.button(
-                                        "⭐" if star_num <= current_rating else "☆",
-                                        key=f"{feedback_key}_star_{star_num}",
-                                        help=f"{star_num} star{'s' if star_num > 1 else ''}",
-                                        use_container_width=True
-                                ):
-                                    st.session_state[feedback_key] = star_num
-                                    st.rerun()
-
-                        if current_rating > 0:
-                            if st.button("Submit Rating", key=f"{feedback_key}_submit", type="primary"):
-                                try:
-                                    st.session_state.feedback_db.store_feedback(
-                                        question=chat['query'],
-                                        response=chat['response'],
-                                        language=chat['language'],
-                                        rating=str(current_rating)
-                                    )
-                                    st.success("Thanks for your feedback!")
-                                    time.sleep(1)
-                                    st.rerun()
-                                except Exception as e:
-                                    st.error(f"Error submitting rating: {str(e)}")
-
-                            if st.button("Clear Rating", key=f"{feedback_key}_clear"):
-                                st.session_state[feedback_key] = 0
+                    for star_num in range(1, 6):
+                        with cols[star_num - 1]:
+                            if st.button(
+                                    "⭐" if star_num <= current_rating else "☆",
+                                    key=f"{feedback_key}_star_{star_num}",
+                                    help=f"{star_num} star{'s' if star_num > 1 else ''}",
+                                    use_container_width=True
+                            ):
+                                st.session_state[feedback_key] = star_num
                                 st.rerun()
 
+                    if current_rating > 0:
+                        if st.button("Submit Rating", key=f"{feedback_key}_submit", type="primary"):
+                            try:
+                                st.session_state.feedback_db.store_feedback(
+                                    question=chat['query'],
+                                    response=chat['response'],
+                                    language=chat['language'],
+                                    rating=str(current_rating)
+                                )
+                                st.success("Thanks for your feedback!")
+                                time.sleep(1)
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"Error submitting rating: {str(e)}")
+
+                        if st.button("Clear Rating", key=f"{feedback_key}_clear"):
+                            st.session_state[feedback_key] = 0
+                            st.rerun()
+
+                if i < len(st.session_state.chat_history) - 1:
+                    st.markdown("<hr style='border-top: 1px dashed #50E3C2; margin: 15px 0;'>", unsafe_allow_html=True)
+
             # Auto-scroll to bottom only when new messages are added
-            if should_scroll or st.session_state.is_streaming:
+            if should_scroll:
                 scroll_to_bottom()
+    else:
+        st.info("Ustaad Jee's Chat is empty. Ask a question to start!")
 
-    # Input form at the bottom
     st.markdown("**Ask Ustaad Jee**")
+    with st.form(key="chat_form", clear_on_submit=True):
+        col1, col2, col3 = st.columns([5, 2, 1])
+        with col1:
+            chat_query = st.text_input(
+                "Type your question...",
+                placeholder="Ask about your document or request an explanation...",
+                label_visibility="collapsed",
+                key="chat_input"
+            )
+        with col2:
+            quick_action = st.selectbox(
+                "Quick Actions",
+                ["Quick Action", "Summarize", "Key Points", "Simplify", "Technical Terms"],
+                key="quick_action_dropdown",
+                label_visibility="collapsed"
+            )
+        with col3:
+            send_btn = st.form_submit_button("Send", type="primary", use_container_width=True)
 
-    # Initialize streaming state
-    if 'is_streaming' not in st.session_state:
-        st.session_state.is_streaming = False
+        if send_btn:
+            if quick_action != "Quick Action":
+                quick_queries = {
+                    "Summarize": "Provide a concise summary of the key points in the user entered document",
+                    "Key Points": "List the main concepts and key points in the user entered document",
+                    "Simplify": "Explain this in simple terms without adding new information in the user entered document",
+                    "Technical Terms": "List and explain the technical terms used in the user entered document"
+                }
+                processed_query = quick_queries[quick_action]
+            else:
+                processed_query = chat_query
 
-    # Input form (only show if not streaming)
-    if not st.session_state.is_streaming:
-        with st.form(key="chat_form", clear_on_submit=True):
-            col1, col2, col3 = st.columns([5, 2, 1])
-            with col1:
-                chat_query = st.text_input(
-                    "Type your question...",
-                    placeholder="Ask about your document or request an explanation...",
-                    label_visibility="collapsed",
-                    key="chat_input"
-                )
-            with col2:
-                quick_action = st.selectbox(
-                    "Quick Actions",
-                    ["Quick Action", "Summarize", "Key Points", "Simplify", "Technical Terms"],
-                    key="quick_action_dropdown",
-                    label_visibility="collapsed"
-                )
-            with col3:
-                send_btn = st.form_submit_button("Send", type="primary", use_container_width=True)
-
-            if send_btn:
-                if quick_action != "Quick Action":
-                    quick_queries = {
-                        "Summarize": "Provide a concise summary of the key points in the user entered document",
-                        "Key Points": "List the main concepts and key points in the user entered document",
-                        "Simplify": "Explain this in simple terms without adding new information in the user entered document",
-                        "Technical Terms": "List and explain the technical terms used in the user entered document"
-                    }
-                    processed_query = quick_queries[quick_action]
-                    query_type = "quick_action"
-                else:
-                    processed_query = chat_query
-                    query_type = "question"
-
-                if processed_query:
-                    # Set up streaming state
-                    st.session_state.current_query = quick_action if quick_action != "Quick Action" else chat_query
-                    st.session_state.current_language = chat_language
-                    st.session_state.current_type = query_type
-
+            if processed_query:
+                with st.spinner("Ustaad Jee is thinking..."):
                     try:
-                        # Get the response stream
-                        stream = generate_response_stream(
+                        user_id = st.session_state.user_info.get('localId', 'unknown_user')
+                        response = generate_response(
                             chat_language=chat_language,
                             query=processed_query,
                             context_text=context_text,
-                            document_text="\n\n".join(document_texts) if document_texts else "",
+                            document_text=document_texts,
                             _glossary_version=st.session_state.get("glossary_version", 0)
                         )
 
-                        st.session_state.current_stream = stream
-                        st.session_state.is_streaming = True
+                        chat_entry = {
+                            "query": quick_action if quick_action != "Quick Action" else chat_query,
+                            "response": response,
+                            "language": chat_language,
+                            "type": "quick_action" if quick_action != "Quick Action" else "question",
+                            "timestamp": time.time()
+                        }
+
+                        st.session_state.chat_history.append(chat_entry)
+                        store_chat_history(user_id, chat_entry)
+                        log_user_activity(user_id, "chat_query",
+                                          {"query": processed_query, "language": chat_language})
                         st.rerun()
-
                     except Exception as e:
-                        st.error(f"Error starting stream: {str(e)}")
-                else:
-                    st.warning("Please enter a question or select an action!")
-
+                        error_message = f"Error: {str(e)}"
+                        chat_entry = {
+                            "query": quick_action if quick_action != "Quick Action" else chat_query,
+                            "response": error_message,
+                            "language": chat_language,
+                            "type": "quick_action" if quick_action != "Quick Action" else "question",
+                            "timestamp": time.time()
+                        }
+                        user_id = st.session_state.user_info.get('localId', 'unknown_user')
+                        store_chat_history(user_id, chat_entry)
+                        st.error(error_message)
+            else:
+                st.warning("Please enter a question or select an action!")
 def create_usage_tips():
     with st.expander("How to Use Ustaad Jee"):
         st.markdown("""
